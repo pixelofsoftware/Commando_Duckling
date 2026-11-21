@@ -1,0 +1,5 @@
+metadata:
+  name: commando_logika
+  version: '1.0.0'
+  license: MIT
+  description: Zasady gry Commando (teren, gracz, wrogowie, granaty, brama), bez okna

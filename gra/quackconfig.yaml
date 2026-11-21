@@ -1,0 +1,12 @@
+metadata:
+  name: commando_gra
+  version: '1.0.0'
+  license: MIT
+  description: Commando - okno, klawiatura, rysowanie i dzwiek (pakiet grafika)
+dependencies:
+  commando_logika:
+    source:
+      path: '../logika'
+  grafika:
+    source:
+      path: '../zewnetrzne/grafika'

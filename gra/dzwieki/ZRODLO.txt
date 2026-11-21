@@ -1,0 +1,2 @@
+Dźwięki wygenerowane syntetycznie przez narzedzia/dzwieki.py (szum i proste fale).
+Licencja jak cały projekt: MIT.

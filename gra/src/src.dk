@@ -1,0 +1,523 @@
+#{
+    Commando: okno, klawiatura, rysowanie i dźwięk (pakiet grafika). Zasady są w pakiecie
+    commando_logika; tu tylko zamieniamy klawisze na sterowanie i rysujemy stan gry.
+
+    Sterowanie: strzałki albo WASD - ruch (8 kierunków), spacja albo Z - strzał,
+    X albo C - granat, P - pauza, M - dźwięk, R - nowa gra, Esc - wyjście.
+#}
+import grafika;
+import commando_logika as model;
+import core.builtins as builtins;
+import core.containers.*;
+
+extern("C") {
+    fundecl write(fd: i32, data: cptr char, size: u64) -> i64;
+    fundecl getenv(name: cptr char) -> cptr char;
+}
+
+const NAPIS: u32 = 0xe8ecf0ffu32;
+const SZARY: u32 = 0xb0b8c0ffu32;
+const CIEN: u32 = 0x00000055u32;
+
+fun bladNaEkran(tekst: str) -> () = {
+    write(2i32, builtins.ptr_from_slice[char](tekst) as cptr char, tekst.length() as u64);
+}
+
+fun naEkranY(g: ref model.Gra, swiatY: f32) -> i32 = (swiatY - g.kameraY) as i32;
+
+fun kolorZiemi(poziom: i32) -> u32 = {
+    let n = (poziom - 1) % 3;
+    if (n == 0) return 0x3d6b2cffu32;     # dżungla
+    if (n == 1) return 0xb38c55ffu32;     # kanion
+    return 0x66704effu32;                 # twierdza
+}
+
+fun kolorPlamek(poziom: i32) -> u32 = {
+    let n = (poziom - 1) % 3;
+    if (n == 0) return 0x2f5a22ffu32;
+    if (n == 1) return 0x9c7746ffu32;
+    return 0x565f40ffu32;
+}
+
+# --- teren -----------------------------------------------------------------------------------
+
+fun rysujKafel(g: ref model.Gra, kolumna: i32, wiersz: i32) -> () = {
+    let rodzaj = model.kafelPola(g, kolumna, wiersz);
+    let x = kolumna * 40;
+    let y = naEkranY(g, (wiersz * 40) as f32);
+    let sx = x + 20;
+    let sy = y + 20;
+    # Ziemia z plamkami w stałych miejscach (zależnych od pola), żeby teren nie migotał.
+    grafika.rectangle(x, y, 40, 40, kolorZiemi(g.poziom));
+    let ziarno = (wiersz * 37 + kolumna * 91) % 97;
+    grafika.circle(x + 6 + ziarno % 28, y + 8 + (ziarno * 7) % 24, 3.0, kolorPlamek(g.poziom));
+    grafika.circle(x + 30 - (ziarno * 3) % 22, y + 30 - ziarno % 18, 2.0, kolorPlamek(g.poziom));
+    if (rodzaj == model.SKALA) {
+        grafika.circle(sx + 2, sy + 3, 18.0, CIEN);
+        grafika.circle(sx, sy, 18.0, 0x767b82ffu32);
+        grafika.circle(sx - 5, sy - 5, 10.0, 0x9aa0a8ffu32);
+        grafika.circle(sx + 7, sy + 6, 5.0, 0x5c6168ffu32);
+    }
+    if (rodzaj == model.DRZEWO) {
+        grafika.circle(sx + 3, sy + 4, 19.0, CIEN);
+        grafika.circle(sx, sy, 19.0, 0x1f4a17ffu32);
+        grafika.circle(sx - 4, sy - 4, 12.0, 0x2f6b22ffu32);
+        grafika.circle(sx - 7, sy - 7, 5.0, 0x4a8f34ffu32);
+    }
+    if (rodzaj == model.WORKI) {
+        var n: i32 = 0;
+        while (n < 3) {
+            grafika.rectangle(x + 1 + n * 13, y + 12, 12, 16, 0xcdb67cffu32);
+            grafika.rectangleLines(x + 1 + n * 13, y + 12, 12, 16, 1.0, 0x8a7646ffu32);
+            n += 1;
+        }
+    }
+    if (rodzaj == model.WODA or rodzaj == model.MOST) {
+        grafika.rectangle(x, y, 40, 40, 0x2c6aa8ffu32);
+        let fala = ((g.kroki / 12) as i32 + kolumna) % 4;
+        grafika.line((x + 4 + fala * 3) as f32, (y + 12) as f32, (x + 18 + fala * 3) as f32, (y + 12) as f32, 2.0, 0x5d97d0ffu32);
+        grafika.line((x + 20 - fala * 2) as f32, (y + 28) as f32, (x + 34 - fala * 2) as f32, (y + 28) as f32, 2.0, 0x5d97d0ffu32);
+    }
+    if (rodzaj == model.MOST) {
+        grafika.rectangle(x, y, 40, 40, 0x8a5a2bffu32);
+        var deska: i32 = 0;
+        while (deska < 5) {
+            grafika.line(x as f32, (y + deska * 8) as f32, (x + 40) as f32, (y + deska * 8) as f32, 1.0, 0x5a3a1affu32);
+            deska += 1;
+        }
+    }
+    if (rodzaj == model.DROGA) {
+        grafika.rectangle(x, y + 2, 40, 36, 0x57534cffu32);
+        grafika.rectangle(x + 8, y + 19, 18, 3, 0xd8d0a0ffu32);
+    }
+    if (rodzaj == model.MUR) {
+        grafika.rectangle(x, y, 40, 40, 0x8a8a80ffu32);
+        grafika.line(x as f32, (y + 20) as f32, (x + 40) as f32, (y + 20) as f32, 1.0, 0x5f5f58ffu32);
+        grafika.line((x + 20) as f32, y as f32, (x + 20) as f32, (y + 20) as f32, 1.0, 0x5f5f58ffu32);
+        grafika.line((x + 10) as f32, (y + 20) as f32, (x + 10) as f32, (y + 40) as f32, 1.0, 0x5f5f58ffu32);
+        grafika.line((x + 30) as f32, (y + 20) as f32, (x + 30) as f32, (y + 40) as f32, 1.0, 0x5f5f58ffu32);
+    }
+    if (rodzaj == model.BRAMA) {
+        if (g.brama) {
+            grafika.rectangle(x, y, 40, 40, 0x1a1410ffu32);
+        } else {
+            grafika.rectangle(x, y, 40, 40, 0x6a4521ffu32);
+            grafika.rectangle(x, y + 8, 40, 4, 0x3a3a3affu32);
+            grafika.rectangle(x, y + 28, 40, 4, 0x3a3a3affu32);
+        }
+    }
+    if (rodzaj == model.OKOP) {
+        grafika.rectangle(x + 4, y + 8, 32, 24, 0x5b4326ffu32);
+        grafika.rectangle(x + 8, y + 12, 24, 16, 0x3e2d18ffu32);
+    }
+}
+
+fun rysujTeren(g: ref model.Gra) -> () = {
+    let pierwszy = (g.kameraY / 40.0) as i32;
+    var wiersz = pierwszy;
+    while (wiersz <= pierwszy + 18) {
+        var kolumna: i32 = 0;
+        while (kolumna < model.KOLUMNY) {
+            rysujKafel(g, kolumna, wiersz);
+            kolumna += 1;
+        }
+        wiersz += 1;
+    }
+}
+
+# --- postacie -----------------------------------------------------------------------------------
+
+# Żołnierz z góry: cień, nogi (w marszu na zmianę), tułów, hełm i lufa w kierunku (kx, ky).
+fun rysujZolnierza(sx: f32, sy: f32, kx: f32, ky: f32, tulow: u32, helm: u32, krokAnim: i32, idzie: bool) -> () = {
+    let x = sx as i32;
+    let y = sy as i32;
+    grafika.circle(x + 2, y + 3, 10.0, CIEN);
+    if (idzie) {
+        let noga = ((krokAnim / 8) % 2) * 2 - 1;
+        grafika.circle(x - 5, y + 4 * noga, 4.0, 0x2a2a22ffu32);
+        grafika.circle(x + 5, y - 4 * noga, 4.0, 0x2a2a22ffu32);
+    }
+    grafika.circle(x, y, 9.0, tulow);
+    grafika.line(sx, sy, sx + kx * 15.0, sy + ky * 15.0, 3.0, 0x1c1c1cffu32);
+    grafika.circle(x, y, 6.0, helm);
+}
+
+fun kierunekDoGracza(g: ref model.Gra, wx: f32, wy: f32) -> model.Kierunek = {
+    let d = model.dlugosc(g.graczX - wx, g.graczY - wy);
+    if (d < 0.001f32) return model.Kierunek(0.0, 1.0);
+    return model.Kierunek((g.graczX - wx) / d, (g.graczY - wy) / d);
+}
+
+fun rysujWroga(g: ref model.Gra, w: ref model.Wrog) -> () = {
+    let sx = w.x;
+    let sy = w.y - g.kameraY;
+    let cel = kierunekDoGracza(g, w.x, w.y);
+    let anim = (g.kroki as i32) + ((w.id as i32) * 13);
+    if (w.typ == model.ZOLNIERZ or w.typ == model.STRAZNIK) {
+        rysujZolnierza(sx, sy, cel.x, cel.y, 0x8d875affu32, 0x5a5636ffu32, anim, true);
+    }
+    if (w.typ == model.GRANATNIK) {
+        rysujZolnierza(sx, sy, cel.x, cel.y, 0xa36d3effu32, 0x5e3f22ffu32, anim, true);
+        grafika.circle((sx + 7.0) as i32, (sy - 6.0) as i32, 3.0, 0x2c3a1cffu32);
+    }
+    if (w.typ == model.STRZELEC) {
+        grafika.circle(sx as i32, sy as i32, 7.0, 0x6f6a45ffu32);
+        grafika.line(sx, sy, sx + cel.x * 14.0, sy + cel.y * 14.0, 3.0, 0x1c1c1cffu32);
+        grafika.circle(sx as i32, sy as i32, 5.0, 0x4a4730ffu32);
+    }
+    if (w.typ == model.OFICER) {
+        rysujZolnierza(sx, sy, w.kx, 0.0, 0x707070ffu32, 0xb83030ffu32, anim * 2, true);
+    }
+    if (w.typ == model.MOTOCYKL) {
+        grafika.rectangle((sx - 18.0) as i32, (sy - 5.0) as i32, 36, 10, CIEN);
+        grafika.rectangle((sx - 19.0) as i32, (sy - 3.0) as i32, 8, 6, 0x111111ffu32);
+        grafika.rectangle((sx + 11.0) as i32, (sy - 3.0) as i32, 8, 6, 0x111111ffu32);
+        grafika.rectangle((sx - 12.0) as i32, (sy - 6.0) as i32, 24, 12, 0x8c2a22ffu32);
+        grafika.circle((sx - w.kx * 3.0) as i32, sy as i32, 6.0, 0x5a5636ffu32);
+        if (w.zycie == 1) grafika.circle((sx + w.kx * 8.0) as i32, (sy - 8.0) as i32, 4.0, 0x404040c0u32);
+    }
+}
+
+fun rysujGracza(g: ref model.Gra) -> () = {
+    let sx = g.graczX;
+    let sy = g.graczY - g.kameraY;
+    if (g.umiera > 0.0) {
+        # Leżący żołnierz: przewrócona sylwetka, bez krwi.
+        grafika.rectangleRotated(sx, sy, 26.0, 12.0, 70.0, 0x2a4f9cffu32);
+        grafika.circle((sx + 9.0) as i32, (sy - 7.0) as i32, 6.0, 0x1d3a7affu32);
+    } else {
+        let miga = g.ochrona > 0.0 and ((g.kroki / 5) % 2) == 0;
+        if (not miga) rysujZolnierza(sx, sy, g.kierX, g.kierY, 0x2f6fd8ffu32, 0x1d3f8affu32, g.kroki as i32, g.idzie);
+    }
+}
+
+fun rysujPrzedmioty(g: ref model.Gra) -> () = {
+    var i: i64 = 0;
+    while (i < g.przedmioty.length()) {
+        let px = g.przedmioty.at(i).x as i32;
+        let py = naEkranY(g, g.przedmioty.at(i).y);
+        if (g.przedmioty.at(i).typ == model.SKRZYNKA) {
+            grafika.rectangle(px - 11, py - 7, 24, 18, CIEN);
+            grafika.rectangle(px - 12, py - 9, 24, 18, 0x5d6b2fffu32);
+            grafika.rectangleLines(px - 12, py - 9, 24, 18, 2.0, 0x39421cffu32);
+            grafika.circle(px - 5, py, 3.0, 0x2c3a1cffu32);
+            grafika.circle(px + 5, py, 3.0, 0x2c3a1cffu32);
+        } else {
+            if (g.przedmioty.at(i).uwolniony and ((g.kroki / 10) % 2) == 0) grafika.circleLines(px, py, 15.0, grafika.YELLOW);
+            grafika.circle(px + 2, py + 3, 9.0, CIEN);
+            grafika.circle(px, py, 8.0, 0xe6e2d6ffu32);
+            grafika.circle(px, py, 5.0, 0xc89a70ffu32);
+            if (g.przedmioty.at(i).uwolniony) {
+                grafika.line((px - 6) as f32, (py - 4) as f32, (px - 10) as f32, (py - 13) as f32, 2.0, 0xc89a70ffu32);
+                grafika.line((px + 6) as f32, (py - 4) as f32, (px + 10) as f32, (py - 13) as f32, 2.0, 0xc89a70ffu32);
+            }
+        }
+        i += 1;
+    }
+}
+
+fun rysujPociskiIGranaty(g: ref model.Gra) -> () = {
+    var i: i64 = 0;
+    while (i < g.pociski.length()) {
+        let px = g.pociski.at(i).x as i32;
+        let py = naEkranY(g, g.pociski.at(i).y);
+        if (g.pociski.at(i).wrogi) grafika.circle(px, py, 3.0, 0xff7a3cffu32);
+        else grafika.circle(px, py, 3.0, 0xfff27affu32);
+        i += 1;
+    }
+    var j: i64 = 0;
+    while (j < g.granatyWLocie.length()) {
+        let pozycja = model.pozycjaGranatu(g.granatyWLocie.at(j));
+        let wysokosc = model.wysokoscGranatu(g.granatyWLocie.at(j));
+        let gx = pozycja.x as i32;
+        let gy = naEkranY(g, pozycja.y);
+        grafika.circle(gx, gy, 4.0, CIEN);
+        grafika.circle(gx, gy - (wysokosc as i32), 4.0, 0x2c3a1cffu32);
+        grafika.circle(gx - 1, gy - (wysokosc as i32) - 1, 1.5, 0x6f8a4affu32);
+        j += 1;
+    }
+    var k: i64 = 0;
+    while (k < g.wybuchy.length()) {
+        let faza = g.wybuchy.at(k).czas / 0.4f32;           # 1 na początku, 0 na końcu
+        let r = g.wybuchy.at(k).promien * (1.1f32 - 0.5f32 * faza);
+        let alfa = (faza * 220.0) as u32;
+        let wx = g.wybuchy.at(k).x as i32;
+        let wy = naEkranY(g, g.wybuchy.at(k).y);
+        grafika.circle(wx, wy, r, 0xff8a2000u32 | alfa);
+        grafika.circle(wx, wy, r * 0.55f32, 0xffe06000u32 | alfa);
+        k += 1;
+    }
+}
+
+# --- napisy -------------------------------------------------------------------------------------
+
+fun napisNaSrodku(tekst: str, y: i32, rozmiar: i32, kolor: u32) -> () = {
+    let pomiar = grafika.textDefaultWidth(tekst, rozmiar);
+    var lewy: i32 = 0;
+    if (pomiar._1 == grafika.OK) lewy = (model.SZEROKOSC - pomiar._2) / 2;
+    grafika.textDefault(tekst, lewy + 2, y + 2, rozmiar, 0x000000c0u32);
+    grafika.textDefault(tekst, lewy, y, rozmiar, kolor);
+}
+
+fun rysujPasek(g: ref model.Gra, dzwiek: bool) -> () = {
+    grafika.rectangle(0, 0, model.SZEROKOSC, 40, 0x0c0f0ad8u32);
+    let punkty = f"{g.punkty}";
+    grafika.textDefault(punkty.asSlice(), 12, 10, 22, NAPIS);
+    let obszar = f"OBSZAR {g.poziom}";
+    napisNaSrodku(obszar.asSlice(), 12, 18, SZARY);
+    # Granaty i życia.
+    grafika.circle(388, 20, 6.0, 0x5d7a2fffu32);
+    let granaty = f"x{g.granaty}";
+    grafika.textDefault(granaty.asSlice(), 398, 12, 18, NAPIS);
+    var n: i32 = 0;
+    while (n < g.zycia and n < 5) {
+        grafika.circle(468 + n * 18, 20, 7.0, 0x2f6fd8ffu32);
+        grafika.circle(468 + n * 18, 20, 4.0, 0x1d3f8affu32);
+        n += 1;
+    }
+    if (g.zycia > 5) grafika.textDefault("+", 556 - 10, 12, 18, NAPIS);
+    if (not dzwiek) grafika.textDefault("M: bez dzwieku", 12, 44, 14, SZARY);
+}
+
+fun rysujScene(g: ref model.Gra, dzwiek: bool, pauza: bool) -> () = {
+    rysujTeren(g);
+    rysujPrzedmioty(g);
+    var i: i64 = 0;
+    while (i < g.wrogowie.length()) {
+        rysujWroga(g, g.wrogowie.at(i));
+        i += 1;
+    }
+    rysujGracza(g);
+    rysujPociskiIGranaty(g);
+    rysujPasek(g, dzwiek);
+    if (g.czasNapisu > 0.0 and not g.koniec) {
+        let tytul = f"OBSZAR {g.poziom}: {model.nazwaObszaru(g.poziom)}";
+        napisNaSrodku(tytul.asSlice(), 250, 34, grafika.YELLOW);
+        napisNaSrodku("ruch: strzalki/WASD   strzal: spacja/Z   granat: X/C", 300, 16, NAPIS);
+    }
+    if (g.brama and not g.ukonczony and g.doWypuszczenia > 0 and g.czasWypuszczenia > 0.6f32 and g.doWypuszczenia == 6 + 2 * g.poziom) {
+        napisNaSrodku("BRAMA!", 260, 40, grafika.YELLOW);
+    }
+    if (g.ukonczony) {
+        napisNaSrodku("OBSZAR ZDOBYTY!", 250, 40, grafika.YELLOW);
+        napisNaSrodku("+3000", 300, 26, NAPIS);
+    }
+    if (pauza and not g.koniec) {
+        grafika.rectangle(0, 0, model.SZEROKOSC, model.WYSOKOSC, 0x000000a0u32);
+        napisNaSrodku("PAUZA", 260, 52, grafika.WHITE);
+        napisNaSrodku("P - gramy dalej", 330, 20, NAPIS);
+        napisNaSrodku("ruch: strzalki/WASD   strzal: spacja/Z   granat: X/C", 380, 16, NAPIS);
+        napisNaSrodku("M - dzwiek   R - nowa gra   Esc - wyjscie", 405, 16, NAPIS);
+    }
+    if (g.koniec) {
+        grafika.rectangle(0, 0, model.SZEROKOSC, model.WYSOKOSC, 0x000000b0u32);
+        napisNaSrodku("KONIEC GRY", 240, 52, grafika.RED);
+        let wynik = f"Wynik: {g.punkty}   obszar {g.poziom}   pokonani: {g.zabici}";
+        napisNaSrodku(wynik.asSlice(), 310, 20, grafika.WHITE);
+        napisNaSrodku("R - nowa gra", 350, 20, NAPIS);
+    }
+}
+
+# --- dźwięk: próbki wygenerowane przez narzedzia/dzwieki.py -----------------------------------
+
+class Dzwieki {
+    dziala: bool = false;
+    strzal: u64 = 0u64;
+    rzut: u64 = 0u64;
+    wybuch: u64 = 0u64;
+    trafienie: u64 = 0u64;
+    smierc: u64 = 0u64;
+    bonus: u64 = 0u64;
+    obszar: u64 = 0u64;
+    koniec: u64 = 0u64;
+}
+
+fun wczytajDzwiek(sciezka: str, glosnosc: f32) -> u64 = {
+    let wynik = grafika.soundLoad(sciezka);
+    if (wynik._1 != grafika.OK) return 0u64;
+    grafika.soundVolume(wynik._2, glosnosc);
+    return wynik._2;
+}
+
+fun otworzDzwieki() -> Dzwieki = {
+    var d = Dzwieki();
+    if (grafika.audioOpen() == grafika.OK) {
+        d.dziala = true;
+        d.strzal = wczytajDzwiek("dzwieki/strzal.wav", 0.35f32);
+        d.rzut = wczytajDzwiek("dzwieki/rzut.wav", 0.5);
+        d.wybuch = wczytajDzwiek("dzwieki/wybuch.wav", 0.7f32);
+        d.trafienie = wczytajDzwiek("dzwieki/trafienie.wav", 0.5);
+        d.smierc = wczytajDzwiek("dzwieki/smierc.wav", 0.6f32);
+        d.bonus = wczytajDzwiek("dzwieki/bonus.wav", 0.6f32);
+        d.obszar = wczytajDzwiek("dzwieki/obszar.wav", 0.6f32);
+        d.koniec = wczytajDzwiek("dzwieki/koniec.wav", 0.6f32);
+    }
+    return d;
+}
+
+fun zagraj(d: ref Dzwieki, uchwyt: u64, wlaczony: bool) -> () = {
+    if (d.dziala and wlaczony and uchwyt != 0u64) grafika.soundPlay(uchwyt);
+}
+
+fun zwolnij(d: ref Dzwieki, uchwyt: u64) -> () = { if (uchwyt != 0u64) grafika.soundUnload(uchwyt); }
+
+fun zamknijDzwieki(d: ref Dzwieki) -> () = {
+    if (d.dziala) {
+        zwolnij(d, d.strzal);
+        zwolnij(d, d.rzut);
+        zwolnij(d, d.wybuch);
+        zwolnij(d, d.trafienie);
+        zwolnij(d, d.smierc);
+        zwolnij(d, d.bonus);
+        zwolnij(d, d.obszar);
+        zwolnij(d, d.koniec);
+        grafika.audioClose();
+    }
+}
+
+fun dzwiekiZdarzen(g: ref model.Gra, d: ref Dzwieki, wlaczony: bool, bylKoniec: bool) -> () = {
+    if (g.wybuchyTeraz > 0) zagraj(d, d.wybuch, wlaczony);
+    else if (g.trafienia > 0) zagraj(d, d.trafienie, wlaczony);
+    if (g.strzaly > 0) zagraj(d, d.strzal, wlaczony);
+    if (g.rzuty > 0) zagraj(d, d.rzut, wlaczony);
+    if (g.koniec and not bylKoniec) zagraj(d, d.koniec, wlaczony);
+    else if (g.smierc) zagraj(d, d.smierc, wlaczony);
+    if (g.bonus > 0 or g.noweZycie) zagraj(d, d.bonus, wlaczony);
+    if (g.nowyPoziom) zagraj(d, d.obszar, wlaczony);
+}
+
+# --- tryb zrzutów do README ---------------------------------------------------------------------
+
+fun zrzutyWlaczone() -> bool = {
+    let wartosc: cptr char = getenv(builtins.ptr_from_slice[char]("COMMANDO_ZRZUTY\0") as cptr char);
+    return wartosc as u64 != 0u64;
+}
+
+fun zapiszKlatke(g: ref model.Gra, sciezka: str) -> i32 = {
+    grafika.frameBegin(0x000000ffu32);
+    rysujScene(g, true, false);
+    let zapis = grafika.frameSave(sciezka);
+    grafika.frameEnd();
+    return zapis;
+}
+
+# Automat do zrzutów: idzie w górę, kołysze się na boki, strzela i rzuca granaty.
+fun automat(n: i32) -> model.Sterowanie = {
+    let faza = (n / 90) % 4;
+    return model.Sterowanie(n % 240 < 200, false, faza == 1, faza == 3, true, n % 150 == 0);
+}
+
+# Przeskok ekranu (do zrzutu bramy): gracz staje w wolnym miejscu w dolnej części ekranu.
+fun przeskocz(g: ref model.Gra, kamera: f32) -> () = {
+    g.kameraY = kamera;
+    var postawiony = false;
+    var rzad: i32 = 0;
+    while (rzad < 6 and not postawiony) {
+        var kolumna: i32 = 6;
+        while (kolumna < 14 and not postawiony) {
+            let px = (kolumna as f32) * 40.0 + 20.0;
+            let py = kamera + 520.0 - (rzad as f32) * 40.0;
+            if (model.wolne(g, px, py, 12.0)) {
+                g.graczX = px;
+                g.graczY = py;
+                postawiony = true;
+            }
+            kolumna += 1;
+        }
+        rzad += 1;
+    }
+    model.wypuscWiersze(g);
+}
+
+fun zapiszZrzuty() -> i32 = {
+    var bledy: i32 = 0;
+    var g = model.nowaGra(11u64);
+    g.zycia = 99;
+    var n: i32 = 0;
+    while (n < 1500) {
+        var s = automat(n);
+        model.krok(&g, &s);
+        n += 1;
+    }
+    # Klatka z akcją: kule w powietrzu i wybuch.
+    var czekaj: i32 = 0;
+    while (czekaj < 600 and not (g.wybuchy.length() > 0 and g.pociski.length() >= 3 and g.wrogowie.length() >= 3 and g.umiera == 0.0 and g.ochrona <= 0.0)) {
+        var s2 = automat(n);
+        model.krok(&g, &s2);
+        n += 1;
+        czekaj += 1;
+    }
+    if (zapiszKlatke(&g, "zrzuty/gra.png") != grafika.OK) bledy += 1;
+
+    var b = model.nowaGra(12u64);
+    model.wczytajPoziom(&b, 3);
+    b.zycia = 99;
+    b.punkty = 18400;
+    przeskocz(&b, 0.0);
+    var k: i32 = 0;
+    while (k < 1200 and not (b.brama and b.doWypuszczenia <= 6 and b.wrogowie.length() >= 4 and b.umiera == 0.0 and b.ochrona <= 0.0)) {
+        var s3 = model.Sterowanie(false, false, (k / 50) % 2 == 0, (k / 50) % 2 == 1, true, k % 110 == 60);
+        model.krok(&b, &s3);
+        k += 1;
+    }
+    b.czasNapisu = 0.0;
+    if (zapiszKlatke(&b, "zrzuty/brama.png") != grafika.OK) bledy += 1;
+    return bledy;
+}
+
+# --- pętla gry -----------------------------------------------------------------------------------
+
+fun ziarnoZCzasu() -> u64 = ((grafika.time() * 1000003.0f64) as u64) | 1u64;
+
+fun main() = {
+    if (grafika.windowOpen(model.SZEROKOSC, model.WYSOKOSC, "Commando w Ducklingu") != grafika.OK) {
+        bladNaEkran("Commando: nie mozna otworzyc okna (brak ekranu albo raylib).\n");
+        return 1;
+    }
+    grafika.setTargetFps(60);
+    if (zrzutyWlaczone()) {
+        let nieZapisane = zapiszZrzuty();
+        grafika.windowClose();
+        if (nieZapisane != 0) {
+            bladNaEkran("Commando: nie zapisano zrzutow (czy istnieje katalog zrzuty/?).\n");
+            return 1;
+        }
+        return 0;
+    }
+
+    var g = model.nowaGra(ziarnoZCzasu());
+    var d = otworzDzwieki();
+    var dzwiek = true;
+    var pauza = false;
+    var input = grafika.InputState();
+
+    while (not input.closeRequested and not grafika.keyPressed(grafika.KEY_ESCAPE)) {
+        grafika.inputPoll(&input);
+        let dt = grafika.frameTime();
+        var s = model.Sterowanie();
+        s.gora = grafika.keyDown(grafika.KEY_UP) or grafika.keyDown(grafika.KEY_W);
+        s.dol = grafika.keyDown(grafika.KEY_DOWN) or grafika.keyDown(grafika.KEY_S);
+        s.lewo = grafika.keyDown(grafika.KEY_LEFT) or grafika.keyDown(grafika.KEY_A);
+        s.prawo = grafika.keyDown(grafika.KEY_RIGHT) or grafika.keyDown(grafika.KEY_D);
+        s.strzal = grafika.keyDown(grafika.KEY_SPACE) or grafika.keyDown(grafika.KEY_Z);
+        s.granat = grafika.keyPressed(grafika.KEY_X) or grafika.keyPressed(grafika.KEY_C);
+        if (grafika.keyPressed(grafika.KEY_P) and not g.koniec) pauza = not pauza;
+        if (grafika.keyPressed(grafika.KEY_M)) dzwiek = not dzwiek;
+        if (grafika.keyPressed(grafika.KEY_R)) {
+            g = model.nowaGra(ziarnoZCzasu());
+            pauza = false;
+        }
+        let bylKoniec = g.koniec;
+        if (not pauza) {
+            model.aktualizuj(&g, dt, s);
+            dzwiekiZdarzen(&g, &d, dzwiek, bylKoniec);
+        }
+        grafika.frameBegin(0x000000ffu32);
+        rysujScene(&g, dzwiek, pauza);
+        grafika.frameEnd();
+    }
+
+    zamknijDzwieki(&d);
+    grafika.windowClose();
+    return 0;
+}

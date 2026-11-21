@@ -1,0 +1,1281 @@
+#{
+    Commando: logika gry (model), bez okna. Na wzór Commando (Capcom, 1985):
+
+    * widok z góry, ekran przewija się w górę, gdy żołnierz idzie naprzód; cofnąć się nie da,
+    * ruch w 8 kierunkach; karabin strzela tam, gdzie żołnierz patrzy, bez limitu amunicji,
+      ale pocisk leci tylko około pół ekranu,
+    * granatów jest mało i zawsze lecą w górę ekranu, nad skałami, workami i wodą,
+    * żołnierz w okopie jest odporny na kule; zabija go tylko granat,
+    * wrogowie: żołnierze, granatnicy, strzelcy w okopach, motocykle i konwoje z jeńcami,
+    * na końcu obszaru ekran staje przy bramie: oficer ucieka, a z bramy wybiega fala
+      żołnierzy; po jej pokonaniu obszar jest zdobyty,
+    * 3 obszary, potem od nowa i trudniej; dodatkowe życie przy 10 000 pkt, potem co 50 000.
+
+    Współrzędne świata są w pikselach, oś Y w dół; wiersz 0 mapy to brama, gracz zaczyna
+    na dole. Gra liczy się stałymi krokami 1/60 s, a losowanie ma własny generator
+    z ziarnem, więc ta sama gra przebiega zawsze tak samo przy każdej liczbie klatek.
+#}
+import std.math as math;
+import core.containers.*;
+
+const SZEROKOSC: i32 = 560;
+const WYSOKOSC: i32 = 720;
+const KAFEL: i32 = 40;
+const KOLUMNY: i32 = 14;
+const PASEK: f32 = 40.0;            # pasek wyniku u góry ekranu
+const PROG_KAMERY: f32 = 300.0;     # wyżej na ekranie gracz pcha ekran w górę
+const KROK: f32 = 0.016666668f32;   # stały krok gry: 1/60 s
+const KROK_D: f64 = 0.016666666666666666f64;
+
+const PREDKOSC_GRACZA: f32 = 150.0;
+const PROMIEN_GRACZA: f32 = 10.0;   # połowa boku kwadratu do zderzeń z terenem
+const PREDKOSC_KULI: f32 = 520.0;
+const ZASIEG_KULI: f32 = 300.0;     # około pół ekranu
+const MAKS_KUL: i32 = 4;
+const ODSTEP_STRZALOW: f32 = 0.15f32;
+const RZUT_GRANATU: f32 = 200.0;    # granat leci 200 px w górę ekranu
+const LOT_GRANATU: f32 = 0.55f32;
+const WYBUCH_GRACZA: f32 = 46.0;
+const WYBUCH_WROGA: f32 = 34.0;
+const SMIERC_S: f32 = 1.4f32;
+const OCHRONA_S: f32 = 2.5f32;
+const PRZEJSCIE_S: f32 = 3.0;
+const ZYCIA_NA_START: i32 = 3;
+const GRANATY_NA_START: i32 = 6;
+
+# Kafle terenu.
+const ZIEMIA: i32 = 0;
+const SKALA: i32 = 1;
+const DRZEWO: i32 = 2;
+const WORKI: i32 = 3;
+const WODA: i32 = 4;
+const MOST: i32 = 5;
+const DROGA: i32 = 6;
+const MUR: i32 = 7;
+const BRAMA: i32 = 8;
+const OKOP: i32 = 9;
+
+# Rodzaje wrogów.
+const ZOLNIERZ: i32 = 0;
+const GRANATNIK: i32 = 1;
+const STRZELEC: i32 = 2;    # w okopie, odporny na kule
+const MOTOCYKL: i32 = 3;
+const OFICER: i32 = 4;
+const STRAZNIK: i32 = 5;    # prowadzi jeńca
+
+# Przedmioty.
+const SKRZYNKA: i32 = 0;
+const JENIEC: i32 = 1;
+
+class Wrog {
+    id: i64 = 0;
+    typ: i32 = ZOLNIERZ;
+    x: f32 = 0.0;
+    y: f32 = 0.0;
+    kx: f32 = 0.0;           # kierunek ruchu
+    ky: f32 = 0.0;
+    predkosc: f32 = 0.0;
+    czasRuchu: f32 = 0.0;    # do zmiany kierunku
+    czasStrzalu: f32 = 0.0;
+    zycie: i32 = 1;
+    zywy: bool = true;
+}
+
+class Pocisk {
+    x: f32 = 0.0;
+    y: f32 = 0.0;
+    vx: f32 = 0.0;
+    vy: f32 = 0.0;
+    zasieg: f32 = 0.0;       # ile pikseli jeszcze przeleci
+    wrogi: bool = false;
+    aktywny: bool = true;
+}
+
+class Granat {
+    x0: f32 = 0.0;
+    y0: f32 = 0.0;
+    x1: f32 = 0.0;
+    y1: f32 = 0.0;
+    czas: f32 = 0.0;
+    czasLotu: f32 = 0.0;
+    promien: f32 = 0.0;
+    wrogi: bool = false;
+    aktywny: bool = true;
+}
+
+class Wybuch {
+    x: f32 = 0.0;
+    y: f32 = 0.0;
+    promien: f32 = 0.0;
+    czas: f32 = 0.0;         # odlicza do zera
+}
+
+class Przedmiot {
+    typ: i32 = SKRZYNKA;
+    x: f32 = 0.0;
+    y: f32 = 0.0;
+    straznik: i64 = -1;      # jeniec: id strażnika
+    uwolniony: bool = false;
+    aktywny: bool = true;
+}
+
+# Przyciski w danej klatce: kierunki i strzał trzymane, granat właśnie naciśnięty.
+class Sterowanie {
+    gora: bool = false;
+    dol: bool = false;
+    lewo: bool = false;
+    prawo: bool = false;
+    strzal: bool = false;
+    granat: bool = false;
+}
+
+fun listaI32() -> List[i32] = { var l: List[i32]; return l; }
+fun listaWrogow() -> List[Wrog] = { var l: List[Wrog]; return l; }
+fun listaPociskow() -> List[Pocisk] = { var l: List[Pocisk]; return l; }
+fun listaGranatow() -> List[Granat] = { var l: List[Granat]; return l; }
+fun listaWybuchow() -> List[Wybuch] = { var l: List[Wybuch]; return l; }
+fun listaPrzedmiotow() -> List[Przedmiot] = { var l: List[Przedmiot]; return l; }
+
+class Gra {
+    poziom: i32 = 1;
+    punkty: i64 = 0;
+    zycia: i32 = ZYCIA_NA_START;
+    granaty: i32 = GRANATY_NA_START;
+    nastepneZycie: i64 = 10000;
+    # Teren: kafle i obiekty (znak z mapy albo 0), wiersz po wierszu.
+    mapa: List[i32] = listaI32();
+    obiekty: List[i32] = listaI32();
+    wiersze: i32 = 0;
+    nastepnyWiersz: i32 = 0;     # najniższy wiersz, którego obiekty jeszcze nie weszły do gry
+    kameraY: f32 = 0.0;          # y świata na górnej krawędzi ekranu
+    graczX: f32 = 0.0;
+    graczY: f32 = 0.0;
+    kierX: f32 = 0.0;            # kierunek patrzenia (strzału)
+    kierY: f32 = -1.0;
+    czasDoStrzalu: f32 = 0.0;
+    ochrona: f32 = 0.0;          # nietykalność po odrodzeniu
+    umiera: f32 = 0.0;           # odliczanie animacji śmierci
+    idzie: bool = false;
+    wrogowie: List[Wrog] = listaWrogow();
+    pociski: List[Pocisk] = listaPociskow();
+    granatyWLocie: List[Granat] = listaGranatow();
+    wybuchy: List[Wybuch] = listaWybuchow();
+    przedmioty: List[Przedmiot] = listaPrzedmiotow();
+    nastepneId: i64 = 1;
+    czasSpawnu: f32 = 2.0;
+    brama: bool = false;         # ekran stoi przy bramie
+    bramaX: f32 = 280.0;
+    doWypuszczenia: i32 = 0;
+    czasWypuszczenia: f32 = 0.0;
+    ukonczony: bool = false;
+    czasPrzejscia: f32 = 0.0;
+    czasNapisu: f32 = 0.0;       # napis z nazwą obszaru po wejściu
+    koniec: bool = false;
+    los: u64 = 1u64;
+    zapasCzasu: f64 = 0.0;
+    kroki: i64 = 0;
+    czekaGranat: bool = false;
+    zabici: i32 = 0;
+    # Zdarzenia z ostatniej aktualizacji (do dźwięków).
+    strzaly: i32 = 0;
+    rzuty: i32 = 0;
+    wybuchyTeraz: i32 = 0;
+    trafienia: i32 = 0;
+    smierc: bool = false;
+    bonus: i32 = 0;
+    nowyPoziom: bool = false;
+    noweZycie: bool = false;
+}
+
+# --- losowanie i drobna matematyka -------------------------------------------------------
+
+fun nastepnaLiczba(g: ref Gra) -> u64 = {
+    var s: u64 = g.los;
+    s = s ^ (s >> 12u64);
+    s = s ^ (s << 25u64);
+    s = s ^ (s >> 27u64);
+    g.los = s;
+    return s * 0x2545f4914f6cdd1du64;
+}
+
+fun losuj(g: ref Gra, od: i32, doWlacznie: i32) -> i32 = {
+    let zakres = (doWlacznie - od + 1) as u64;
+    return od + ((nastepnaLiczba(g) % zakres) as i32);
+}
+
+# Liczba z przedziału [od, doF) z krokiem 1/10000.
+fun losujF(g: ref Gra, od: f32, doF: f32) -> f32 = {
+    let ulamek = ((nastepnaLiczba(g) % 10000u64) as f32) / 10000.0;
+    return od + (doF - od) * ulamek;
+}
+
+fun dlugosc(dx: f32, dy: f32) -> f32 = math.sqrt(dx * dx + dy * dy);
+
+fun minF(a: f32, b: f32) -> f32 = { if (a < b) return a; return b; }
+fun maxF(a: f32, b: f32) -> f32 = { if (a > b) return a; return b; }
+
+# --- teren ---------------------------------------------------------------------------------
+
+fun znakNaKafel(znak: u32) -> i32 = {
+    if (znak == 35u32) return SKALA;     # '#'
+    if (znak == 84u32) return DRZEWO;    # 'T'
+    if (znak == 61u32) return WORKI;     # '='
+    if (znak == 126u32) return WODA;     # '~'
+    if (znak == 72u32) return MOST;      # 'H'
+    if (znak == 45u32) return DROGA;     # '-'
+    if (znak == 77u32) return DROGA;     # 'M' motocykl jedzie drogą
+    if (znak == 87u32) return MUR;       # 'W'
+    if (znak == 71u32) return BRAMA;     # 'G'
+    if (znak == 83u32) return OKOP;      # 'S' strzelec w okopie
+    if (znak == 111u32) return OKOP;     # 'o'
+    return ZIEMIA;
+}
+
+# Obiekt na kaflu (znak ASCII) albo 0.
+fun znakNaObiekt(znak: u32) -> i32 = {
+    if (znak == 83u32 or znak == 103u32 or znak == 74u32 or znak == 77u32 or znak == 82u32 or znak == 78u32) {
+        return znak as i32;
+    }
+    return 0;
+}
+
+fun blokujeRuch(k: i32) -> bool = k == SKALA or k == DRZEWO or k == WORKI or k == WODA or k == MUR or k == BRAMA;
+fun blokujeKuleGracza(k: i32) -> bool = k == SKALA or k == DRZEWO or k == WORKI or k == MUR or k == BRAMA;
+# Wrogowie strzelają znad worków z piaskiem; skały, drzewa i mur zatrzymują wszystkie kule.
+fun blokujeKuleWroga(k: i32) -> bool = k == SKALA or k == DRZEWO or k == MUR or k == BRAMA;
+
+fun kafelPola(g: ref Gra, kolumna: i32, wiersz: i32) -> i32 = {
+    if (kolumna < 0 or kolumna >= KOLUMNY or wiersz < 0) return MUR;
+    if (wiersz >= g.wiersze) return ZIEMIA;
+    return g.mapa.at((wiersz * KOLUMNY + kolumna) as i64);
+}
+
+# Kafel pod punktem świata; poza mapą z boków i nad nią jest mur.
+fun kafel(g: ref Gra, px: f32, py: f32) -> i32 = {
+    if (px < 0.0 or py < 0.0) return MUR;
+    return kafelPola(g, (px / 40.0) as i32, (py / 40.0) as i32);
+}
+
+# Czy kwadrat o środku (px, py) i połowie boku polowa nie wchodzi na przeszkodę.
+fun wolne(g: ref Gra, px: f32, py: f32, polowa: f32) -> bool = {
+    return not blokujeRuch(kafel(g, px - polowa, py - polowa)) and not blokujeRuch(kafel(g, px + polowa, py - polowa))
+        and not blokujeRuch(kafel(g, px - polowa, py + polowa)) and not blokujeRuch(kafel(g, px + polowa, py + polowa));
+}
+
+fun nazwaObszaru(poziom: i32) -> str = {
+    let n = (poziom - 1) % 3;
+    if (n == 0) return "DZUNGLA";
+    if (n == 1) return "KANION";
+    return "TWIERDZA";
+}
+
+fun mapaPoziomu(poziom: i32) -> List[str] = {
+    let n = (poziom - 1) % 3;
+    if (n == 0) return mapa1();
+    if (n == 1) return mapa2();
+    return mapa3();
+}
+
+# Nowy teren z listy wierszy (każdy po 14 znaków); gracz staje na dole, ekran na końcu mapy.
+fun wczytajMape(g: ref Gra, wiersze: ref List[str]) -> () = {
+    var kafle: List[i32];
+    var znaczniki: List[i32];
+    var sumaBramy: f32 = 0.0;
+    var polaBramy: i32 = 0;
+    var w: i64 = 0;
+    while (w < wiersze.length()) {
+        let tekst = wiersze.at(w);
+        var k: i64 = 0;
+        while (k < (KOLUMNY as i64)) {
+            var znak: u32 = 46u32;
+            if (k < tekst.length()) znak = tekst[k] as u32;
+            let rodzaj = znakNaKafel(znak);
+            kafle.push(rodzaj);
+            znaczniki.push(znakNaObiekt(znak));
+            if (rodzaj == BRAMA) {
+                sumaBramy += (k as f32) * 40.0 + 20.0;
+                polaBramy += 1;
+            }
+            k += 1;
+        }
+        w += 1;
+    }
+    g.mapa = move kafle;
+    g.obiekty = move znaczniki;
+    g.wiersze = wiersze.length() as i32;
+    if (polaBramy > 0) g.bramaX = sumaBramy / (polaBramy as f32);
+    g.kameraY = maxF(0.0, ((g.wiersze * KAFEL - WYSOKOSC) as f32));
+    g.graczX = 280.0;
+    g.graczY = ((g.wiersze * KAFEL) as f32) - 60.0;
+    g.kierX = 0.0;
+    g.kierY = -1.0;
+    g.wrogowie = listaWrogow();
+    g.pociski = listaPociskow();
+    g.granatyWLocie = listaGranatow();
+    g.wybuchy = listaWybuchow();
+    g.przedmioty = listaPrzedmiotow();
+    g.nastepnyWiersz = g.wiersze - 1;
+    g.brama = false;
+    g.doWypuszczenia = 0;
+    g.ukonczony = false;
+    g.czasSpawnu = 2.0;
+    g.umiera = 0.0;
+    g.ochrona = 1.0;
+    g.czasNapisu = 2.0;
+    wypuscWiersze(g);
+}
+
+fun wczytajPoziom(g: ref Gra, poziom: i32) -> () = {
+    g.poziom = poziom;
+    var wiersze = mapaPoziomu(poziom);
+    wczytajMape(g, &wiersze);
+}
+
+fun nowaGra(ziarno: u64) -> Gra = {
+    var g = Gra();
+    if (ziarno == 0u64) g.los = 1u64;
+    else g.los = ziarno;
+    wczytajPoziom(&g, 1);
+    return g;
+}
+
+# --- wrogowie i przedmioty ------------------------------------------------------------------
+
+fun predkoscZolnierza(g: ref Gra) -> f32 = minF(110.0, 60.0 + 6.0 * (g.poziom as f32));
+
+# Mnożnik odstępu między strzałami: z każdym poziomem wrogowie strzelają częściej.
+fun tempoOgnia(g: ref Gra) -> f32 = maxF(0.45f32, 1.0 - 0.08f32 * ((g.poziom - 1) as f32));
+
+fun dodajWroga(g: ref Gra, rodzaj: i32, px: f32, py: f32) -> i64 = {
+    var w = Wrog();
+    w.id = g.nastepneId;
+    g.nastepneId += 1;
+    w.typ = rodzaj;
+    w.x = px;
+    w.y = py;
+    w.predkosc = predkoscZolnierza(g);
+    w.czasRuchu = 0.0;
+    w.czasStrzalu = losujF(g, 1.5f32, 3.0) * tempoOgnia(g);
+    if (rodzaj == MOTOCYKL) {
+        w.zycie = 2;
+        w.predkosc = minF(330.0, 220.0 + 15.0 * (g.poziom as f32));
+    }
+    if (rodzaj == OFICER) w.predkosc = 150.0;
+    if (rodzaj == STRAZNIK) w.predkosc = 55.0;
+    if (rodzaj == STRZELEC) w.predkosc = 0.0;
+    g.wrogowie.push(w);
+    return w.id;
+}
+
+fun indeksWroga(g: ref Gra, id: i64) -> i64 = {
+    var wynik: i64 = -1;
+    var i: i64 = 0;
+    while (i < g.wrogowie.length()) {
+        if (g.wrogowie.at(i).id == id) wynik = i;
+        i += 1;
+    }
+    return wynik;
+}
+
+fun dodajPrzedmiot(g: ref Gra, rodzaj: i32, px: f32, py: f32, straznikId: i64) -> () = {
+    var p = Przedmiot();
+    p.typ = rodzaj;
+    p.x = px;
+    p.y = py;
+    p.straznik = straznikId;
+    g.przedmioty.push(p);
+}
+
+# Obiekty z jednego wiersza mapy wchodzą do gry, gdy wiersz pojawia się nad ekranem.
+fun wypuscWiersz(g: ref Gra, wiersz: i32) -> () = {
+    let srodekY = (wiersz as f32) * 40.0 + 20.0;
+    var k: i32 = 0;
+    while (k < KOLUMNY) {
+        let znak = g.obiekty.at((wiersz * KOLUMNY + k) as i64);
+        let srodekX = (k as f32) * 40.0 + 20.0;
+        if (znak == 83) dodajWroga(g, STRZELEC, srodekX, srodekY);                      # 'S'
+        if (znak == 103) dodajPrzedmiot(g, SKRZYNKA, srodekX, srodekY, -1);             # 'g'
+        if (znak == 78) dodajWroga(g, GRANATNIK, srodekX, srodekY);                     # 'N'
+        if (znak == 82) {                                                                # 'R': trójka
+            var n: i32 = -1;
+            while (n <= 1) {
+                let ox = srodekX + (n as f32) * 30.0;
+                if (wolne(g, ox, srodekY, 11.0)) dodajWroga(g, ZOLNIERZ, ox, srodekY);
+                n += 1;
+            }
+        }
+        if (znak == 77) {                                                                # 'M'
+            var startX: f32 = -30.0;
+            var zwrot: f32 = 1.0;
+            if (k > 6) {
+                startX = (SZEROKOSC as f32) + 30.0;
+                zwrot = -1.0;
+            }
+            let moto = dodajWroga(g, MOTOCYKL, startX, srodekY);
+            g.wrogowie.at(indeksWroga(g, moto)).kx = zwrot;
+        }
+        if (znak == 74) {                                                                # 'J': konwój
+            var wejscieX: f32 = -20.0;
+            var kierunek: f32 = 1.0;
+            if (k > 6) {
+                wejscieX = (SZEROKOSC as f32) + 20.0;
+                kierunek = -1.0;
+            }
+            let straz = dodajWroga(g, STRAZNIK, wejscieX, srodekY);
+            g.wrogowie.at(indeksWroga(g, straz)).kx = kierunek;
+            dodajPrzedmiot(g, JENIEC, wejscieX - kierunek * 32.0, srodekY, straz);
+        }
+        k += 1;
+    }
+}
+
+fun wypuscWiersze(g: ref Gra) -> () = {
+    while (g.nastepnyWiersz >= 0 and ((g.nastepnyWiersz + 1) as f32) * 40.0 > g.kameraY - 40.0) {
+        wypuscWiersz(g, g.nastepnyWiersz);
+        g.nastepnyWiersz -= 1;
+    }
+}
+
+fun liczWrogich(g: ref Gra) -> i32 = {
+    var ile: i32 = 0;
+    var i: i64 = 0;
+    while (i < g.wrogowie.length()) {
+        if (g.wrogowie.at(i).zywy and g.wrogowie.at(i).typ != OFICER) ile += 1;
+        i += 1;
+    }
+    return ile;
+}
+
+fun liczKuleGracza(g: ref Gra) -> i32 = {
+    var ile: i32 = 0;
+    var i: i64 = 0;
+    while (i < g.pociski.length()) {
+        if (g.pociski.at(i).aktywny and not g.pociski.at(i).wrogi) ile += 1;
+        i += 1;
+    }
+    return ile;
+}
+
+fun naEkranie(g: ref Gra, py: f32) -> bool = py > g.kameraY + PASEK and py < g.kameraY + (WYSOKOSC as f32);
+
+# Losowi żołnierze wchodzą nad górną krawędzią ekranu albo z boku.
+fun spawnLosowy(g: ref Gra) -> () = {
+    g.czasSpawnu -= KROK;
+    if (g.czasSpawnu <= 0.0 and not g.brama) {
+        g.czasSpawnu = maxF(0.7f32, 1.8f32 - 0.15f32 * ((g.poziom - 1) as f32)) * losujF(g, 0.7f32, 1.3f32);
+        if (liczWrogich(g) < 3 + g.poziom) {
+            var rodzaj = ZOLNIERZ;
+            if (losuj(g, 1, 100) <= 20 + 5 * g.poziom) rodzaj = GRANATNIK;
+            if (losuj(g, 1, 100) <= 70) {
+                let gornyY = g.kameraY - 16.0;
+                if (gornyY > 120.0) {
+                    var proba: i32 = 0;
+                    var postawiony = false;
+                    while (proba < 6 and not postawiony) {
+                        let kolumna = losuj(g, 0, KOLUMNY - 1);
+                        let px = (kolumna as f32) * 40.0 + 20.0;
+                        if (wolne(g, px, gornyY, 11.0)) {
+                            let nowy = dodajWroga(g, rodzaj, px, gornyY);
+                            g.wrogowie.at(indeksWroga(g, nowy)).ky = 1.0;
+                            g.wrogowie.at(indeksWroga(g, nowy)).czasRuchu = 0.6f32;
+                            postawiony = true;
+                        }
+                        proba += 1;
+                    }
+                }
+            } else {
+                var bokX: f32 = 14.0;
+                if (losuj(g, 0, 1) == 1) bokX = (SZEROKOSC as f32) - 14.0;
+                let bokY = g.kameraY + losujF(g, 90.0, 380.0);
+                if (wolne(g, bokX, bokY, 11.0)) dodajWroga(g, rodzaj, bokX, bokY);
+            }
+        }
+    }
+}
+
+# Kierunek w jednym z 8 kierunków, najbliższy wektorowi (dx, dy).
+class Kierunek { x: f32 = 0.0; y: f32 = 0.0; }
+
+fun osiem(dx: f32, dy: f32) -> Kierunek = {
+    let d = dlugosc(dx, dy);
+    var wynik = Kierunek();
+    if (d > 0.001f32) {
+        let nx = dx / d;
+        let ny = dy / d;
+        if (nx > 0.38f32) wynik.x = 1.0;
+        if (nx < -0.38f32) wynik.x = -1.0;
+        if (ny > 0.38f32) wynik.y = 1.0;
+        if (ny < -0.38f32) wynik.y = -1.0;
+        if (wynik.x != 0.0 and wynik.y != 0.0) {
+            wynik.x = wynik.x * 0.70710677f32;
+            wynik.y = wynik.y * 0.70710677f32;
+        }
+    }
+    return wynik;
+}
+
+fun wybierzKierunek(g: ref Gra, i: i64) -> () = {
+    let wx = g.wrogowie.at(i).x;
+    let wy = g.wrogowie.at(i).y;
+    var cel = Kierunek();
+    if (losuj(g, 1, 100) <= 65) {
+        cel = osiem(g.graczX - wx, g.graczY - wy);
+    } else {
+        # Losowo, ale raczej w dół ekranu, w stronę gracza.
+        cel = osiem(losujF(g, -1.0, 1.0), losujF(g, -0.3f32, 1.0));
+    }
+    g.wrogowie.at(i).kx = cel.x;
+    g.wrogowie.at(i).ky = cel.y;
+    g.wrogowie.at(i).czasRuchu = losujF(g, 0.6f32, 1.4f32);
+}
+
+fun graczCaly(g: ref Gra) -> bool = g.umiera <= 0.0 and not g.koniec;
+
+fun strzelDoGracza(g: ref Gra, px: f32, py: f32) -> () = {
+    let dx = g.graczX - px;
+    let dy = g.graczY - py;
+    let d = dlugosc(dx, dy);
+    if (d > 1.0) {
+        let v = minF(320.0, 180.0 + 12.0 * (g.poziom as f32));
+        var p = Pocisk();
+        p.x = px + dx / d * 12.0;
+        p.y = py + dy / d * 12.0;
+        p.vx = dx / d * v;
+        p.vy = dy / d * v;
+        p.zasieg = 520.0;
+        p.wrogi = true;
+        g.pociski.push(p);
+    }
+}
+
+fun rzucGranatWroga(g: ref Gra, px: f32, py: f32) -> () = {
+    var gr = Granat();
+    gr.x0 = px;
+    gr.y0 = py;
+    gr.x1 = g.graczX + losujF(g, -18.0, 18.0);
+    gr.y1 = g.graczY + losujF(g, -18.0, 18.0);
+    gr.czasLotu = 0.9f32;
+    gr.promien = WYBUCH_WROGA;
+    gr.wrogi = true;
+    g.granatyWLocie.push(gr);
+}
+
+# Ruch z kolizjami osobno w osi X i Y; zwraca false, gdy coś zatrzymało ruch.
+fun przesunWroga(g: ref Gra, i: i64, dx: f32, dy: f32) -> bool = {
+    var swobodnie = true;
+    let nx = g.wrogowie.at(i).x + dx;
+    if (wolne(g, nx, g.wrogowie.at(i).y, 11.0)) g.wrogowie.at(i).x = nx;
+    else if (dx != 0.0) swobodnie = false;
+    let ny = g.wrogowie.at(i).y + dy;
+    if (wolne(g, g.wrogowie.at(i).x, ny, 11.0)) g.wrogowie.at(i).y = ny;
+    else if (dy != 0.0) swobodnie = false;
+    return swobodnie;
+}
+
+fun ruchWroga(g: ref Gra, i: i64) -> () = {
+    let rodzaj = g.wrogowie.at(i).typ;
+    let v = g.wrogowie.at(i).predkosc * KROK;
+    if (rodzaj == ZOLNIERZ or rodzaj == GRANATNIK) {
+        g.wrogowie.at(i).czasRuchu -= KROK;
+        if (g.wrogowie.at(i).czasRuchu <= 0.0) wybierzKierunek(g, i);
+        let odl = dlugosc(g.graczX - g.wrogowie.at(i).x, g.graczY - g.wrogowie.at(i).y);
+        # Granatnik zatrzymuje się w zasięgu rzutu.
+        if (not (rodzaj == GRANATNIK and odl < 220.0 and naEkranie(g, g.wrogowie.at(i).y))) {
+            let ruchX = g.wrogowie.at(i).kx * v;
+            let ruchY = g.wrogowie.at(i).ky * v;
+            if (not przesunWroga(g, i, ruchX, ruchY)) g.wrogowie.at(i).czasRuchu = 0.0;
+        }
+    }
+    if (rodzaj == MOTOCYKL or rodzaj == STRAZNIK or rodzaj == OFICER) {
+        g.wrogowie.at(i).x += g.wrogowie.at(i).kx * v;
+        g.wrogowie.at(i).y += g.wrogowie.at(i).ky * v;
+    }
+    # Ogień.
+    if (rodzaj != MOTOCYKL and rodzaj != OFICER) {
+        g.wrogowie.at(i).czasStrzalu -= KROK;
+        if (g.wrogowie.at(i).czasStrzalu <= 0.0) {
+            g.wrogowie.at(i).czasStrzalu = losujF(g, 1.8f32, 3.2f32) * tempoOgnia(g);
+            let wx = g.wrogowie.at(i).x;
+            let wy = g.wrogowie.at(i).y;
+            let dystans = dlugosc(g.graczX - wx, g.graczY - wy);
+            if (graczCaly(g) and naEkranie(g, wy) and not g.ukonczony) {
+                if (rodzaj == GRANATNIK) {
+                    if (dystans < 300.0) rzucGranatWroga(g, wx, wy);
+                } else if (dystans < 460.0) {
+                    strzelDoGracza(g, wx, wy);
+                }
+            }
+        }
+    }
+}
+
+# --- punkty, trafienia, śmierć ------------------------------------------------------------------
+
+fun dodajPunkty(g: ref Gra, ile: i64) -> () = {
+    g.punkty += ile;
+    while (g.punkty >= g.nastepneZycie) {
+        g.zycia += 1;
+        g.noweZycie = true;
+        if (g.nastepneZycie == 10000) g.nastepneZycie = 50000;
+        else g.nastepneZycie += 50000;
+    }
+}
+
+fun punktyZa(rodzaj: i32) -> i64 = {
+    if (rodzaj == GRANATNIK) return 150;
+    if (rodzaj == STRZELEC) return 300;
+    if (rodzaj == MOTOCYKL) return 500;
+    if (rodzaj == OFICER) return 2000;
+    if (rodzaj == STRAZNIK) return 200;
+    return 100;
+}
+
+fun dodajWybuch(g: ref Gra, px: f32, py: f32, promien: f32) -> () = {
+    g.wybuchy.push(Wybuch(px, py, promien, 0.4f32));
+}
+
+fun zabij(g: ref Gra, i: i64) -> () = {
+    if (g.wrogowie.at(i).zywy) {
+        g.wrogowie.at(i).zywy = false;
+        g.zabici += 1;
+        g.trafienia += 1;
+        dodajPunkty(g, punktyZa(g.wrogowie.at(i).typ));
+        dodajWybuch(g, g.wrogowie.at(i).x, g.wrogowie.at(i).y, 12.0);
+        if (g.wrogowie.at(i).typ == STRAZNIK) {
+            let id = g.wrogowie.at(i).id;
+            var p: i64 = 0;
+            while (p < g.przedmioty.length()) {
+                if (g.przedmioty.at(p).straznik == id) g.przedmioty.at(p).uwolniony = true;
+                p += 1;
+            }
+        }
+    }
+}
+
+fun trafGracza(g: ref Gra) -> () = {
+    if (graczCaly(g) and g.ochrona <= 0.0 and not g.ukonczony) {
+        g.umiera = SMIERC_S;
+        g.smierc = true;
+    }
+}
+
+# Odrodzenie na dole ekranu w wolnym miejscu; kule i granaty wroga znikają.
+fun odrodz(g: ref Gra) -> () = {
+    var kule: List[Pocisk];
+    var i: i64 = 0;
+    while (i < g.pociski.length()) {
+        if (not g.pociski.at(i).wrogi) {
+            var p: Pocisk = g.pociski.at(i);
+            kule.push(p);
+        }
+        i += 1;
+    }
+    g.pociski = move kule;
+    g.granatyWLocie = listaGranatow();
+    let dolY = g.kameraY + (WYSOKOSC as f32) - 80.0;
+    var znaleziony = false;
+    var rzad: i32 = 0;
+    while (rzad < 8 and not znaleziony) {
+        var krokX: i32 = 0;
+        while (krokX < KOLUMNY and not znaleziony) {
+            var przes: i32 = (krokX + 1) / 2;
+            if (krokX % 2 == 1) przes = -przes;
+            let px = 280.0 + (przes as f32) * 40.0;
+            let py = dolY - (rzad as f32) * 40.0;
+            if (px > 15.0 and px < 545.0 and wolne(g, px, py, PROMIEN_GRACZA + 2.0)) {
+                g.graczX = px;
+                g.graczY = py;
+                znaleziony = true;
+            }
+            krokX += 1;
+        }
+        rzad += 1;
+    }
+    g.kierX = 0.0;
+    g.kierY = -1.0;
+    g.ochrona = OCHRONA_S;
+}
+
+# --- gracz ------------------------------------------------------------------------------------------
+
+fun ruchGracza(g: ref Gra, s: ref Sterowanie) -> () = {
+    var dx: f32 = 0.0;
+    var dy: f32 = 0.0;
+    if (s.lewo) dx -= 1.0;
+    if (s.prawo) dx += 1.0;
+    if (s.gora) dy -= 1.0;
+    if (s.dol) dy += 1.0;
+    g.idzie = dx != 0.0 or dy != 0.0;
+    if (g.idzie) {
+        if (dx != 0.0 and dy != 0.0) {
+            dx = dx * 0.70710677f32;
+            dy = dy * 0.70710677f32;
+        }
+        g.kierX = dx;
+        g.kierY = dy;
+        let v = PREDKOSC_GRACZA * KROK;
+        let minY = g.kameraY + PASEK + 14.0;
+        let maxY = g.kameraY + (WYSOKOSC as f32) - 16.0;
+        let nx = maxF(14.0, minF((SZEROKOSC as f32) - 14.0, g.graczX + dx * v));
+        if (wolne(g, nx, g.graczY, PROMIEN_GRACZA)) g.graczX = nx;
+        let ny = maxF(minY, minF(maxY, g.graczY + dy * v));
+        if (wolne(g, g.graczX, ny, PROMIEN_GRACZA)) g.graczY = ny;
+    }
+    # Ekran jedzie w górę, gdy gracz przekroczy próg; w dół nigdy.
+    if (g.graczY - g.kameraY < PROG_KAMERY and g.kameraY > 0.0) {
+        g.kameraY = maxF(0.0, g.graczY - PROG_KAMERY);
+    }
+}
+
+fun ogienGracza(g: ref Gra, s: ref Sterowanie) -> () = {
+    if (g.czasDoStrzalu > 0.0) g.czasDoStrzalu -= KROK;
+    if (s.strzal and g.czasDoStrzalu <= 0.0 and liczKuleGracza(g) < MAKS_KUL) {
+        var p = Pocisk();
+        p.x = g.graczX + g.kierX * 14.0;
+        p.y = g.graczY + g.kierY * 14.0;
+        p.vx = g.kierX * PREDKOSC_KULI;
+        p.vy = g.kierY * PREDKOSC_KULI;
+        p.zasieg = ZASIEG_KULI;
+        p.wrogi = false;
+        g.pociski.push(p);
+        g.czasDoStrzalu = ODSTEP_STRZALOW;
+        g.strzaly += 1;
+    }
+    # Granat zawsze w górę ekranu, bez względu na kierunek patrzenia.
+    if (s.granat and g.granaty > 0) {
+        var gr = Granat();
+        gr.x0 = g.graczX;
+        gr.y0 = g.graczY - 10.0;
+        gr.x1 = g.graczX;
+        gr.y1 = g.graczY - RZUT_GRANATU;
+        gr.czasLotu = LOT_GRANATU;
+        gr.promien = WYBUCH_GRACZA;
+        gr.wrogi = false;
+        g.granatyWLocie.push(gr);
+        g.granaty -= 1;
+        g.rzuty += 1;
+    }
+}
+
+# --- pociski, granaty, przedmioty ------------------------------------------------------------------
+
+fun promienWroga(rodzaj: i32) -> f32 = { if (rodzaj == MOTOCYKL) return 18.0; return 12.0; }
+
+fun ruchPociskow(g: ref Gra) -> () = {
+    var i: i64 = 0;
+    while (i < g.pociski.length()) {
+        if (g.pociski.at(i).aktywny) {
+            let px = g.pociski.at(i).x + g.pociski.at(i).vx * KROK;
+            let py = g.pociski.at(i).y + g.pociski.at(i).vy * KROK;
+            g.pociski.at(i).x = px;
+            g.pociski.at(i).y = py;
+            g.pociski.at(i).zasieg -= dlugosc(g.pociski.at(i).vx, g.pociski.at(i).vy) * KROK;
+            let teren = kafel(g, px, py);
+            let wrogaKula = g.pociski.at(i).wrogi;
+            if (g.pociski.at(i).zasieg <= 0.0 or py < g.kameraY - 20.0 or py > g.kameraY + (WYSOKOSC as f32) + 20.0
+                or px < -10.0 or px > (SZEROKOSC as f32) + 10.0) {
+                g.pociski.at(i).aktywny = false;
+            } else if ((wrogaKula and blokujeKuleWroga(teren)) or (not wrogaKula and blokujeKuleGracza(teren))) {
+                g.pociski.at(i).aktywny = false;
+            } else if (wrogaKula) {
+                if (graczCaly(g) and dlugosc(g.graczX - px, g.graczY - py) < 9.0 and g.ochrona <= 0.0) {
+                    g.pociski.at(i).aktywny = false;
+                    trafGracza(g);
+                }
+            } else {
+                var j: i64 = 0;
+                while (j < g.wrogowie.length() and g.pociski.at(i).aktywny) {
+                    if (g.wrogowie.at(j).zywy and dlugosc(g.wrogowie.at(j).x - px, g.wrogowie.at(j).y - py) < promienWroga(g.wrogowie.at(j).typ) + 3.0) {
+                        g.pociski.at(i).aktywny = false;
+                        # Strzelec w okopie: kula grzęźnie w ziemi.
+                        if (g.wrogowie.at(j).typ != STRZELEC) {
+                            g.wrogowie.at(j).zycie -= 1;
+                            if (g.wrogowie.at(j).zycie <= 0) zabij(g, j);
+                        }
+                    }
+                    j += 1;
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+fun wybuchGranatu(g: ref Gra, i: i64) -> () = {
+    let wx = g.granatyWLocie.at(i).x1;
+    let wy = g.granatyWLocie.at(i).y1;
+    let zasieg = g.granatyWLocie.at(i).promien;
+    dodajWybuch(g, wx, wy, zasieg);
+    g.wybuchyTeraz += 1;
+    if (g.granatyWLocie.at(i).wrogi) {
+        if (dlugosc(g.graczX - wx, g.graczY - wy) < zasieg) trafGracza(g);
+    } else {
+        var j: i64 = 0;
+        while (j < g.wrogowie.length()) {
+            if (g.wrogowie.at(j).zywy and dlugosc(g.wrogowie.at(j).x - wx, g.wrogowie.at(j).y - wy) < zasieg + promienWroga(g.wrogowie.at(j).typ)) {
+                zabij(g, j);
+            }
+            j += 1;
+        }
+    }
+}
+
+fun lotGranatow(g: ref Gra) -> () = {
+    var i: i64 = 0;
+    while (i < g.granatyWLocie.length()) {
+        if (g.granatyWLocie.at(i).aktywny) {
+            g.granatyWLocie.at(i).czas += KROK;
+            if (g.granatyWLocie.at(i).czas >= g.granatyWLocie.at(i).czasLotu) {
+                g.granatyWLocie.at(i).aktywny = false;
+                wybuchGranatu(g, i);
+            }
+        }
+        i += 1;
+    }
+}
+
+# Pozycja granatu w locie: x i y po prostej, wysokość nad ziemią po łuku (do rysowania).
+fun pozycjaGranatu(gr: ref Granat) -> Kierunek = {
+    let t = minF(1.0, gr.czas / gr.czasLotu);
+    return Kierunek(gr.x0 + (gr.x1 - gr.x0) * t, gr.y0 + (gr.y1 - gr.y0) * t);
+}
+
+fun wysokoscGranatu(gr: ref Granat) -> f32 = {
+    let t = minF(1.0, gr.czas / gr.czasLotu);
+    return 4.0 * 36.0 * t * (1.0 - t);
+}
+
+fun obslugaPrzedmiotow(g: ref Gra) -> () = {
+    var i: i64 = 0;
+    while (i < g.przedmioty.length()) {
+        if (g.przedmioty.at(i).aktywny) {
+            if (g.przedmioty.at(i).typ == JENIEC and not g.przedmioty.at(i).uwolniony) {
+                let s = indeksWroga(g, g.przedmioty.at(i).straznik);
+                if (s < 0) {
+                    g.przedmioty.at(i).aktywny = false;   # konwój odjechał
+                } else {
+                    g.przedmioty.at(i).x = g.wrogowie.at(s).x - g.wrogowie.at(s).kx * 32.0;
+                    g.przedmioty.at(i).y = g.wrogowie.at(s).y;
+                }
+            } else if (graczCaly(g) and dlugosc(g.przedmioty.at(i).x - g.graczX, g.przedmioty.at(i).y - g.graczY) < 24.0) {
+                g.przedmioty.at(i).aktywny = false;
+                g.bonus += 1;
+                if (g.przedmioty.at(i).typ == SKRZYNKA) g.granaty = minF(99.0, (g.granaty + 4) as f32) as i32;
+                else dodajPunkty(g, 1000);
+            }
+            if (g.przedmioty.at(i).y > g.kameraY + (WYSOKOSC as f32) + 40.0) g.przedmioty.at(i).aktywny = false;
+        }
+        i += 1;
+    }
+}
+
+fun dotykWrogow(g: ref Gra) -> () = {
+    if (graczCaly(g) and g.ochrona <= 0.0) {
+        var i: i64 = 0;
+        while (i < g.wrogowie.length()) {
+            if (g.wrogowie.at(i).zywy and dlugosc(g.wrogowie.at(i).x - g.graczX, g.wrogowie.at(i).y - g.graczY) < promienWroga(g.wrogowie.at(i).typ) + 8.0) {
+                trafGracza(g);
+            }
+            i += 1;
+        }
+    }
+}
+
+# Usuwa martwych wrogów, zużyte kule, granaty, wybuchy i zebrane przedmioty.
+fun sprzataj(g: ref Gra) -> () = {
+    let dol = g.kameraY + (WYSOKOSC as f32) + 60.0;
+    var wrogowie: List[Wrog];
+    var a: i64 = 0;
+    while (a < g.wrogowie.length()) {
+        var w: Wrog = g.wrogowie.at(a);
+        if (w.zywy and w.y < dol and w.x > -80.0 and w.x < (SZEROKOSC as f32) + 80.0) wrogowie.push(w);
+        a += 1;
+    }
+    g.wrogowie = move wrogowie;
+    var kule: List[Pocisk];
+    var b: i64 = 0;
+    while (b < g.pociski.length()) {
+        var p: Pocisk = g.pociski.at(b);
+        if (p.aktywny) kule.push(p);
+        b += 1;
+    }
+    g.pociski = move kule;
+    var granaty: List[Granat];
+    var c: i64 = 0;
+    while (c < g.granatyWLocie.length()) {
+        var gr: Granat = g.granatyWLocie.at(c);
+        if (gr.aktywny) granaty.push(gr);
+        c += 1;
+    }
+    g.granatyWLocie = move granaty;
+    var wybuchy: List[Wybuch];
+    var d: i64 = 0;
+    while (d < g.wybuchy.length()) {
+        var wb: Wybuch = g.wybuchy.at(d);
+        wb.czas -= KROK;
+        if (wb.czas > 0.0) wybuchy.push(wb);
+        d += 1;
+    }
+    g.wybuchy = move wybuchy;
+    var rzeczy: List[Przedmiot];
+    var e: i64 = 0;
+    while (e < g.przedmioty.length()) {
+        var pr: Przedmiot = g.przedmioty.at(e);
+        if (pr.aktywny) rzeczy.push(pr);
+        e += 1;
+    }
+    g.przedmioty = move rzeczy;
+}
+
+# --- brama na końcu obszaru --------------------------------------------------------------------------
+
+fun obslugaBramy(g: ref Gra) -> () = {
+    if (not g.brama and g.kameraY <= 0.0) {
+        g.brama = true;
+        g.doWypuszczenia = 6 + 2 * g.poziom;
+        g.czasWypuszczenia = 1.2f32;
+        let oficer = dodajWroga(g, OFICER, g.bramaX, 100.0);
+        var zwrot: f32 = 1.0;
+        if (losuj(g, 0, 1) == 0) zwrot = -1.0;
+        g.wrogowie.at(indeksWroga(g, oficer)).kx = zwrot;
+    }
+    if (g.brama and not g.ukonczony) {
+        if (g.doWypuszczenia > 0) {
+            g.czasWypuszczenia -= KROK;
+            if (g.czasWypuszczenia <= 0.0) {
+                var rodzaj = ZOLNIERZ;
+                if (g.doWypuszczenia % 4 == 0) rodzaj = GRANATNIK;
+                let nowy = dodajWroga(g, rodzaj, g.bramaX + losujF(g, -12.0, 12.0), 100.0);
+                let ind = indeksWroga(g, nowy);
+                g.wrogowie.at(ind).ky = 1.0;
+                g.wrogowie.at(ind).czasRuchu = 0.5;
+                g.doWypuszczenia -= 1;
+                g.czasWypuszczenia = maxF(0.35f32, 0.85f32 - 0.05f32 * (g.poziom as f32));
+            }
+        } else if (liczWrogich(g) == 0 and graczCaly(g)) {
+            g.ukonczony = true;
+            g.czasPrzejscia = PRZEJSCIE_S;
+            g.nowyPoziom = true;
+            dodajPunkty(g, 3000);
+            odrodzBezRuchu(g);
+        }
+    }
+}
+
+# Po zdobyciu obszaru kule i granaty wroga znikają (gracz zostaje na miejscu).
+fun odrodzBezRuchu(g: ref Gra) -> () = {
+    var kule: List[Pocisk];
+    var i: i64 = 0;
+    while (i < g.pociski.length()) {
+        if (not g.pociski.at(i).wrogi) {
+            var p: Pocisk = g.pociski.at(i);
+            kule.push(p);
+        }
+        i += 1;
+    }
+    g.pociski = move kule;
+    var swoje: List[Granat];
+    var j: i64 = 0;
+    while (j < g.granatyWLocie.length()) {
+        if (not g.granatyWLocie.at(j).wrogi) {
+            var gr: Granat = g.granatyWLocie.at(j);
+            swoje.push(gr);
+        }
+        j += 1;
+    }
+    g.granatyWLocie = move swoje;
+}
+
+# --- krok gry ----------------------------------------------------------------------------------------
+
+fun krok(g: ref Gra, s: ref Sterowanie) -> () = {
+    if (not g.koniec) {
+        g.kroki += 1;
+        if (g.czasNapisu > 0.0) g.czasNapisu -= KROK;
+        if (g.ochrona > 0.0) g.ochrona -= KROK;
+        if (g.ukonczony) {
+            g.czasPrzejscia -= KROK;
+            if (g.czasPrzejscia <= 0.0) wczytajPoziom(g, g.poziom + 1);
+        }
+        if (g.umiera > 0.0) {
+            g.umiera -= KROK;
+            if (g.umiera <= 0.0) {
+                g.umiera = 0.0;
+                g.zycia -= 1;
+                if (g.zycia <= 0) {
+                    g.zycia = 0;
+                    g.koniec = true;
+                } else {
+                    odrodz(g);
+                }
+            }
+        } else {
+            ruchGracza(g, s);
+            ogienGracza(g, s);
+        }
+        if (not g.koniec) {
+            wypuscWiersze(g);
+            spawnLosowy(g);
+            obslugaBramy(g);
+            var i: i64 = 0;
+            while (i < g.wrogowie.length()) {
+                if (g.wrogowie.at(i).zywy) ruchWroga(g, i);
+                i += 1;
+            }
+            ruchPociskow(g);
+            lotGranatow(g);
+            obslugaPrzedmiotow(g);
+            dotykWrogow(g);
+            sprzataj(g);
+        }
+    }
+}
+
+fun wyczyscZdarzenia(g: ref Gra) -> () = {
+    g.strzaly = 0;
+    g.rzuty = 0;
+    g.wybuchyTeraz = 0;
+    g.trafienia = 0;
+    g.smierc = false;
+    g.bonus = 0;
+    g.nowyPoziom = false;
+    g.noweZycie = false;
+}
+
+#{
+    Aktualizacja o czas klatki: tyle stałych kroków 1/60 s, ile mieści się w zebranym czasie.
+    Granat naciśnięty w klatce bez pełnego kroku czeka na następny krok, więc się nie gubi.
+#}
+fun aktualizuj(g: ref Gra, dt: f32, s: Sterowanie) -> () = {
+    wyczyscZdarzenia(g);
+    if (s.granat) g.czekaGranat = true;
+    var czas: f64 = dt as f64;
+    if (not (czas > 0.0f64)) czas = 0.0f64;     # także NaN
+    if (czas > 0.25f64) czas = 0.25f64;         # dłuższej przerwy nie nadrabiamy
+    g.zapasCzasu += czas;
+    while (g.zapasCzasu + 0.000001f64 >= KROK_D and not g.koniec) {
+        var teraz = s;
+        teraz.granat = g.czekaGranat;
+        g.czekaGranat = false;
+        krok(g, &teraz);
+        g.zapasCzasu -= KROK_D;
+    }
+    if (g.zapasCzasu < 0.0f64) g.zapasCzasu = 0.0f64;
+}
+
+# --- mapy (wygenerowane przez narzedzia/mapy.py, które sprawdza też drogę do bramy) ---------------
+
+fun mapa1() -> List[str] = {
+    var m: List[str];
+    m.push("WWWWWWWWWWWWWW");
+    m.push("WWWWWWGGWWWWWW");
+    m.push("..............");
+    m.push("..T........T..");
+    m.push("...S......S...");
+    m.push("..===....===..");
+    m.push("..............");
+    m.push("T....g.......T");
+    m.push("..............");
+    m.push("#.....##.....#");
+    m.push("..............");
+    m.push(".T..N.....T...");
+    m.push("..............");
+    m.push("TT..........TT");
+    m.push(".....R........");
+    m.push("..............");
+    m.push("#.T........T.#");
+    m.push("..............");
+    m.push("......J.......");
+    m.push("..............");
+    m.push("~~~~~HH~~~~~~~");
+    m.push("~~~~~HH~~~~~~~");
+    m.push("..............");
+    m.push("..S.......S...");
+    m.push(".===.....===..");
+    m.push("..............");
+    m.push("T.....g......T");
+    m.push("M-------------");
+    m.push("..............");
+    m.push("..T...##...T..");
+    m.push("..............");
+    m.push("....R.....N...");
+    m.push("..............");
+    m.push("TT....T.....TT");
+    m.push("..............");
+    m.push("...#......#...");
+    m.push("...#..S...#...");
+    m.push("......==......");
+    m.push("..............");
+    m.push(".T..........T.");
+    m.push("......J.......");
+    m.push("..............");
+    m.push("~~~~~~~~HH~~~~");
+    m.push("~~~~~~~~HH~~~~");
+    m.push("..............");
+    m.push("..N.......R...");
+    m.push("..............");
+    m.push("T....T..T....T");
+    m.push("..............");
+    m.push("-------------M");
+    m.push("..............");
+    m.push(".#....g.....#.");
+    m.push("..............");
+    m.push("...T......T...");
+    m.push("......R.......");
+    m.push("..............");
+    m.push("TT..##..##..TT");
+    m.push("..............");
+    m.push("..S........S..");
+    m.push(".===......===.");
+    m.push("..............");
+    m.push("T............T");
+    m.push("..............");
+    m.push("...T......T...");
+    m.push("..............");
+    m.push("TT..........TT");
+    m.push("..............");
+    m.push("..............");
+    m.push("T.....g......T");
+    m.push("..............");
+    m.push("..............");
+    m.push("..............");
+    return m;
+}
+
+fun mapa2() -> List[str] = {
+    var m: List[str];
+    m.push("WWWWWWWWWWWWWW");
+    m.push("WWWWWWGGWWWWWW");
+    m.push("..............");
+    m.push(".#..........#.");
+    m.push(".#S..S..S..S#.");
+    m.push(".#==.==.==.=#.");
+    m.push("..............");
+    m.push("###...g....###");
+    m.push("..............");
+    m.push("....N....N....");
+    m.push("..............");
+    m.push("##....##....##");
+    m.push("#.....##.....#");
+    m.push("..............");
+    m.push("M-------------");
+    m.push("..............");
+    m.push("...R......R...");
+    m.push("..............");
+    m.push("####..##..####");
+    m.push("###...##...###");
+    m.push("..............");
+    m.push("..S........S..");
+    m.push(".===......===.");
+    m.push("......g.......");
+    m.push("..............");
+    m.push(".#..#....#..#.");
+    m.push("..............");
+    m.push("-------------M");
+    m.push("..............");
+    m.push("....N....N....");
+    m.push("#............#");
+    m.push("##....##....##");
+    m.push("###...##...###");
+    m.push("..............");
+    m.push("......J.......");
+    m.push("..............");
+    m.push(".##........##.");
+    m.push(".##..S..S..##.");
+    m.push(".##..====..##.");
+    m.push("..............");
+    m.push("..R........R..");
+    m.push("..............");
+    m.push("###..#..#..###");
+    m.push("..............");
+    m.push("....g.........");
+    m.push("M-------------");
+    m.push("..............");
+    m.push(".#..N....N..#.");
+    m.push(".#..........#.");
+    m.push("..............");
+    m.push("###........###");
+    m.push("##....##....##");
+    m.push("#.....##.....#");
+    m.push("..............");
+    m.push("...S......S...");
+    m.push("..===....===..");
+    m.push("..............");
+    m.push(".....R..R.....");
+    m.push("..............");
+    m.push("#............#");
+    m.push("##..........##");
+    m.push("..............");
+    m.push(".....g........");
+    m.push("..............");
+    m.push("..............");
+    m.push("#............#");
+    m.push("..............");
+    m.push("..............");
+    return m;
+}
+
+fun mapa3() -> List[str] = {
+    var m: List[str];
+    m.push("WWWWWWWWWWWWWW");
+    m.push("WWWWWWGGWWWWWW");
+    m.push("..............");
+    m.push(".==.==..==.==.");
+    m.push("..............");
+    m.push(".S..S....S..S.");
+    m.push(".==.==..==.==.");
+    m.push("..............");
+    m.push("WWW..WWWW..WWW");
+    m.push("..............");
+    m.push("....N....N....");
+    m.push("..............");
+    m.push("~~~HH~~~~HH~~~");
+    m.push("~~~HH~~~~HH~~~");
+    m.push("..............");
+    m.push("..R...g....R..");
+    m.push("..............");
+    m.push("M-------------");
+    m.push("..............");
+    m.push("WW....WW....WW");
+    m.push("W.S..........W");
+    m.push("W==...N....S.W");
+    m.push(".........====.");
+    m.push("..............");
+    m.push("......J.......");
+    m.push("..............");
+    m.push("~~~~~~HH~~~~~~");
+    m.push("~~~~~~HH~~~~~~");
+    m.push("..............");
+    m.push(".S..........S.");
+    m.push(".==...##...==.");
+    m.push("..............");
+    m.push("-------------M");
+    m.push("..............");
+    m.push("...N......N...");
+    m.push("..............");
+    m.push("WWW...WW...WWW");
+    m.push("..S........S..");
+    m.push(".===..g...===.");
+    m.push("..............");
+    m.push(".....R..R.....");
+    m.push("..............");
+    m.push("~~HH~~~~~~HH~~");
+    m.push("~~HH~~~~~~HH~~");
+    m.push("..............");
+    m.push("...S......S...");
+    m.push("..===....===..");
+    m.push("..............");
+    m.push("M-------------");
+    m.push("..............");
+    m.push("..T...g....T..");
+    m.push("..............");
+    m.push("TT....RR....TT");
+    m.push("..............");
+    m.push("..............");
+    m.push(".T..........T.");
+    m.push("..............");
+    m.push("..............");
+    m.push("T............T");
+    m.push("..............");
+    return m;
+}

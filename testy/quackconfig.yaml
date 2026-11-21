@@ -1,0 +1,8 @@
+metadata:
+  name: testy_commando
+  version: '1.0.0'
+  license: MIT
+dependencies:
+  commando_logika:
+    source:
+      path: '../logika'

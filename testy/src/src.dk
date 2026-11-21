@@ -1,0 +1,508 @@
+#{
+    Testy logiki Commando (bez okna): `duck run` w katalogu testy/.
+    Kod wyjścia to liczba nieudanych sprawdzeń (0 = wszystko w porządku).
+#}
+import commando_logika as model;
+import core.containers.*;
+
+var nieudane: i32 = 0;
+var wszystkie: i32 = 0;
+
+fun sprawdz(warunek: bool, opis: str) -> () = {
+    wszystkie += 1;
+    if (warunek) {
+        print(f"  OK    {opis}\n".asSlice());
+    } else {
+        nieudane += 1;
+        print(f"  BLAD  {opis}\n".asSlice());
+    }
+}
+
+fun blisko(a: f32, b: f32, tolerancja: f32) -> bool = {
+    let roznica = a - b;
+    return roznica <= tolerancja and roznica >= -tolerancja;
+}
+
+fun ster(gora: bool, dol: bool, lewo: bool, prawo: bool, strzal: bool, granat: bool) -> model.Sterowanie = {
+    return model.Sterowanie(gora, dol, lewo, prawo, strzal, granat);
+}
+
+fun nic() -> model.Sterowanie = model.Sterowanie();
+
+fun pustaMapa(wierszy: i32) -> List[str] = {
+    var m: List[str];
+    var n: i32 = 0;
+    while (n < wierszy) { m.push(".............."); n += 1; }
+    return m;
+}
+
+# Gra na mapie testowej, bez losowych żołnierzy i bez ochrony na starcie.
+fun naMapie(m: ref List[str]) -> model.Gra = {
+    var g = model.nowaGra(5u64);
+    model.wczytajMape(&g, m);
+    g.czasSpawnu = 100000.0;
+    g.ochrona = 0.0;
+    return g;
+}
+
+fun graj(g: ref model.Gra, s: model.Sterowanie, krokow: i32) -> () = {
+    var n: i32 = 0;
+    var kopia = s;
+    while (n < krokow) { model.krok(g, &kopia); n += 1; }
+}
+
+# Nieruchomy, niestrzelający wróg (cel do testów).
+fun cel(g: ref model.Gra, rodzaj: i32, px: f32, py: f32) -> i64 = {
+    let id = model.dodajWroga(g, rodzaj, px, py);
+    let i = model.indeksWroga(g, id);
+    g.wrogowie.at(i).predkosc = 0.0;
+    g.wrogowie.at(i).czasStrzalu = 100000.0;
+    g.wrogowie.at(i).czasRuchu = 100000.0;
+    return id;
+}
+
+fun zyje(g: ref model.Gra, id: i64) -> bool = model.indeksWroga(g, id) >= 0;
+
+fun ileWrogichKul(g: ref model.Gra) -> i32 = {
+    var ile: i32 = 0;
+    var i: i64 = 0;
+    while (i < g.pociski.length()) {
+        if (g.pociski.at(i).wrogi) ile += 1;
+        i += 1;
+    }
+    return ile;
+}
+
+fun kulaWroga(g: ref model.Gra, px: f32, py: f32, vx: f32, vy: f32) -> () = {
+    var p = model.Pocisk();
+    p.x = px; p.y = py; p.vx = vx; p.vy = vy; p.zasieg = 500.0; p.wrogi = true;
+    g.pociski.push(p);
+}
+
+# --- testy -------------------------------------------------------------------------------------
+
+fun testStartu() -> () = {
+    print("Start\n");
+    var g = model.nowaGra(1u64);
+    sprawdz(g.zycia == 3 and g.granaty == 6 and g.poziom == 1 and g.punkty == 0, "3 zycia, 6 granatow, obszar 1, 0 punktow");
+    sprawdz(g.wiersze == 72 and blisko(g.kameraY, 2160.0, 0.01f32), "Dzungla: 72 wiersze, ekran na dole mapy");
+    sprawdz(model.wolne(&g, g.graczX, g.graczY, model.PROMIEN_GRACZA), "gracz zaczyna na wolnym polu");
+    sprawdz(blisko(g.bramaX, 280.0, 0.01f32), "brama na srodku muru");
+}
+
+# Przeszukanie wszerz po kaflach: czy od gracza da się dojść pod bramę, omijając okopy ze strzelcami.
+fun drogaDoBramy(g: ref model.Gra) -> bool = {
+    var odwiedzone: List[bool];
+    var n: i64 = 0;
+    while (n < g.mapa.length()) { odwiedzone.push(false); n += 1; }
+    var kolejka: List[i32];
+    let start = ((g.graczY / 40.0) as i32) * model.KOLUMNY + ((g.graczX / 40.0) as i32);
+    kolejka.push(start);
+    odwiedzone.at(start as i64) = true;
+    var glowa: i64 = 0;
+    while (glowa < kolejka.length()) {
+        let pole = kolejka.at(glowa);
+        let w = pole / model.KOLUMNY;
+        let k = pole % model.KOLUMNY;
+        var kierunek: i32 = 0;
+        while (kierunek < 4) {
+            var nw = w;
+            var nk = k;
+            if (kierunek == 0) nw -= 1;
+            if (kierunek == 1) nw += 1;
+            if (kierunek == 2) nk -= 1;
+            if (kierunek == 3) nk += 1;
+            if (nw >= 0 and nw < g.wiersze and nk >= 0 and nk < model.KOLUMNY) {
+                let indeks = (nw * model.KOLUMNY + nk) as i64;
+                if (not odwiedzone.at(indeks) and not model.blokujeRuch(g.mapa.at(indeks)) and g.obiekty.at(indeks) != 83) {
+                    odwiedzone.at(indeks) = true;
+                    kolejka.push(nw * model.KOLUMNY + nk);
+                }
+            }
+            kierunek += 1;
+        }
+        glowa += 1;
+    }
+    return odwiedzone.at((2 * model.KOLUMNY + 6) as i64);
+}
+
+fun testMap() -> () = {
+    print("Mapy obszarow\n");
+    var p: i32 = 1;
+    while (p <= 3) {
+        var g = model.nowaGra(3u64);
+        model.wczytajPoziom(&g, p);
+        sprawdz(drogaDoBramy(&g), f"obszar {p} ({model.nazwaObszaru(p)}): jest droga od startu pod brame".asSlice());
+        p += 1;
+    }
+    var h = model.nowaGra(3u64);
+    model.wczytajPoziom(&h, 4);
+    sprawdz(h.wiersze == 72 and h.poziom == 4, "po 3 obszarach mapy wracaja od poczatku");
+}
+
+fun testRuchu() -> () = {
+    print("Ruch gracza\n");
+    var m = pustaMapa(40);
+    var g = naMapie(&m);
+    let x0 = g.graczX;
+    graj(&g, ster(false, false, false, true, false, false), 60);
+    sprawdz(blisko(g.graczX - x0, 150.0, 1.0), "1 s w prawo: 150 px");
+    sprawdz(blisko(g.kierX, 1.0, 0.001f32) and blisko(g.kierY, 0.0, 0.001f32), "zolnierz patrzy w strone ruchu");
+    let x1 = g.graczX;
+    let y1 = g.graczY;
+    graj(&g, ster(true, false, true, false, false, false), 60);
+    sprawdz(blisko(model.dlugosc(g.graczX - x1, g.graczY - y1), 150.0, 1.0), "po skosie ta sama predkosc (150 px/s)");
+    graj(&g, ster(false, false, true, false, false, false), 300);
+    sprawdz(blisko(g.graczX, 14.0, 0.01f32), "lewa krawedz ekranu zatrzymuje");
+}
+
+fun testTerenu() -> () = {
+    print("Teren\n");
+    var m = pustaMapa(40);
+    m.at(36) = "......##......";
+    var g = naMapie(&m);
+    graj(&g, ster(true, false, false, false, false, false), 60);
+    sprawdz(g.graczY >= 1490.0 and g.graczY < 1500.0, "skala zatrzymuje marsz w gore");
+    var w = pustaMapa(40);
+    w.at(36) = "~~~~~~HH~~~~~~";
+    w.at(37) = "~~~~~~HH~~~~~~";
+    var rzeka = naMapie(&w);
+    rzeka.graczX = 100.0;
+    graj(&rzeka, ster(true, false, false, false, false, false), 120);
+    sprawdz(rzeka.graczY >= 1530.0, "woda zatrzymuje");
+    var most = naMapie(&w);
+    graj(&most, ster(true, false, false, false, false, false), 120);
+    sprawdz(most.graczY < 1440.0, "przez most mozna przejsc");
+}
+
+fun testKamery() -> () = {
+    print("Przewijanie\n");
+    var m = pustaMapa(60);
+    var g = naMapie(&m);
+    let start = g.kameraY;
+    graj(&g, ster(true, false, false, false, false, false), 180);
+    sprawdz(g.kameraY < start, "marsz w gore przewija ekran");
+    sprawdz(blisko(g.graczY - g.kameraY, model.PROG_KAMERY, 1.0), "przy przewijaniu gracz stoi na progu ekranu");
+    let kamera = g.kameraY;
+    graj(&g, ster(false, true, false, false, false, false), 300);
+    sprawdz(g.kameraY == kamera, "ekran nie wraca w dol");
+    sprawdz(g.graczY <= g.kameraY + 704.0, "gracz nie wychodzi za dolna krawedz");
+}
+
+fun testStrzalu() -> () = {
+    print("Karabin\n");
+    var m = pustaMapa(40);
+    var g = naMapie(&m);
+    graj(&g, ster(false, false, false, true, false, false), 1);
+    graj(&g, ster(false, false, false, false, true, false), 1);
+    sprawdz(g.pociski.length() == 1 and g.pociski.at(0).vx > 0.0 and g.pociski.at(0).vy == 0.0, "kula leci tam, gdzie zolnierz patrzy");
+    var z = naMapie(&m);
+    graj(&z, ster(false, false, false, false, true, false), 1);
+    graj(&z, nic(), 30);
+    sprawdz(z.pociski.length() == 1, "po 0,5 s kula jeszcze leci");
+    graj(&z, nic(), 10);
+    sprawdz(z.pociski.length() == 0, "zasieg okolo pol ekranu (300 px), potem kula znika");
+    var h = naMapie(&m);
+    var najwiecej: i64 = 0;
+    var n: i32 = 0;
+    while (n < 120) {
+        graj(&h, ster(false, false, false, false, true, false), 1);
+        if (h.pociski.length() > najwiecej) najwiecej = h.pociski.length();
+        n += 1;
+    }
+    sprawdz(najwiecej == 4, "ogien ciagly: najwyzej 4 kule naraz");
+}
+
+fun testKuliIGranatu() -> () = {
+    print("Kule, skaly i granaty\n");
+    var m = pustaMapa(40);
+    m.at(35) = "......##......";
+    var g = naMapie(&m);
+    let za = cel(&g, model.ZOLNIERZ, g.graczX, g.graczY - 200.0);
+    graj(&g, ster(false, false, false, false, true, false), 60);
+    sprawdz(zyje(&g, za), "skala zatrzymuje kule: zolnierz za nia zyje");
+    graj(&g, ster(false, false, false, false, false, true), 1);
+    sprawdz(g.granaty == 5 and g.granatyWLocie.length() == 1, "rzut granatu: 6 -> 5");
+    graj(&g, nic(), 40);
+    sprawdz(not zyje(&g, za) and g.punkty == 100, "granat przelatuje nad skala i zabija (+100)");
+
+    var h = naMapie(&m);
+    graj(&h, ster(false, false, false, true, false, false), 1);
+    graj(&h, ster(false, false, false, false, false, true), 1);
+    sprawdz(blisko(h.granatyWLocie.at(0).x1, h.graczX, 0.01f32) and blisko(h.granatyWLocie.at(0).y1, h.graczY - 200.0, 0.01f32),
+        "granat leci w gore ekranu, choc zolnierz patrzy w prawo");
+    h.granaty = 0;
+    graj(&h, nic(), 40);
+    graj(&h, ster(false, false, false, false, false, true), 1);
+    sprawdz(h.granatyWLocie.length() == 0, "bez granatow nic nie leci");
+}
+
+fun testWrogow() -> () = {
+    print("Wrogowie\n");
+    var m = pustaMapa(40);
+    var g = naMapie(&m);
+    let okop = cel(&g, model.STRZELEC, g.graczX, g.graczY - 150.0);
+    graj(&g, ster(false, false, false, false, true, false), 90);
+    sprawdz(zyje(&g, okop), "strzelec w okopie jest odporny na kule");
+    var h = naMapie(&m);
+    let okop2 = cel(&h, model.STRZELEC, h.graczX, h.graczY - 200.0);
+    graj(&h, ster(false, false, false, false, false, true), 40);
+    sprawdz(not zyje(&h, okop2) and h.punkty == 300, "granat zabija strzelca w okopie (+300)");
+
+    var z = naMapie(&m);
+    let zolnierz = cel(&z, model.ZOLNIERZ, z.graczX, z.graczY - 150.0);
+    graj(&z, ster(false, false, false, false, true, false), 30);
+    sprawdz(not zyje(&z, zolnierz) and z.punkty == 100 and z.zabici == 1, "kula zabija zolnierza (+100)");
+
+    var mt = naMapie(&m);
+    let moto = cel(&mt, model.MOTOCYKL, mt.graczX, mt.graczY - 150.0);
+    graj(&mt, ster(false, false, false, false, true, false), 1);
+    graj(&mt, nic(), 25);
+    sprawdz(zyje(&mt, moto) and mt.wrogowie.at(model.indeksWroga(&mt, moto)).zycie == 1, "motocykl po jednym trafieniu jedzie dalej");
+    graj(&mt, ster(false, false, false, false, true, false), 30);
+    sprawdz(not zyje(&mt, moto) and mt.punkty == 500, "drugie trafienie niszczy motocykl (+500)");
+
+    var o = naMapie(&m);
+    let oficer = cel(&o, model.OFICER, o.graczX, o.graczY - 150.0);
+    graj(&o, ster(false, false, false, false, true, false), 30);
+    sprawdz(not zyje(&o, oficer) and o.punkty == 2000, "oficer trafiony w plecy: +2000");
+
+    var gn = naMapie(&m);
+    let granatnik = model.dodajWroga(&gn, model.GRANATNIK, gn.graczX + 50.0, gn.graczY - 200.0);
+    gn.wrogowie.at(model.indeksWroga(&gn, granatnik)).czasStrzalu = 0.0;
+    gn.ochrona = 100.0;
+    graj(&gn, nic(), 1);
+    sprawdz(gn.granatyWLocie.length() == 1 and gn.granatyWLocie.at(0).wrogi
+        and model.dlugosc(gn.granatyWLocie.at(0).x1 - gn.graczX, gn.granatyWLocie.at(0).y1 - gn.graczY) < 26.0,
+        "granatnik rzuca granat w miejsce, gdzie stoi gracz");
+}
+
+fun testSmierci() -> () = {
+    print("Smierc i odrodzenie\n");
+    var m = pustaMapa(40);
+    var g = naMapie(&m);
+    g.granaty = 3;
+    kulaWroga(&g, g.graczX, g.graczY - 60.0, 0.0, 200.0);
+    kulaWroga(&g, 40.0, g.graczY - 300.0, 0.0, 10.0);
+    graj(&g, nic(), 30);
+    sprawdz(g.umiera > 0.0 and g.zycia == 3, "trafienie kula wroga: animacja smierci");
+    graj(&g, nic(), 90);
+    sprawdz(g.zycia == 2 and g.umiera == 0.0 and g.ochrona > 0.0, "po animacji: jedno zycie mniej i chwila nietykalnosci");
+    sprawdz(ileWrogichKul(&g) == 0 and g.granaty == 3, "kule wroga znikaja, granaty zostaja");
+    sprawdz(model.wolne(&g, g.graczX, g.graczY, model.PROMIEN_GRACZA), "odrodzenie na wolnym polu");
+    kulaWroga(&g, g.graczX, g.graczY - 30.0, 0.0, 200.0);
+    graj(&g, nic(), 20);
+    sprawdz(g.umiera == 0.0, "nietykalny gracz nie ginie");
+
+    var d = naMapie(&m);
+    let z = model.dodajWroga(&d, model.ZOLNIERZ, d.graczX + 10.0, d.graczY);
+    d.wrogowie.at(model.indeksWroga(&d, z)).czasStrzalu = 1000.0;
+    graj(&d, nic(), 1);
+    sprawdz(d.umiera > 0.0, "dotkniecie wroga zabija");
+
+    var gr = naMapie(&m);
+    var swoj = model.Granat();
+    swoj.x0 = gr.graczX; swoj.y0 = gr.graczY; swoj.x1 = gr.graczX; swoj.y1 = gr.graczY; swoj.czasLotu = 0.1f32; swoj.promien = 46.0;
+    gr.granatyWLocie.push(swoj);
+    graj(&gr, nic(), 10);
+    sprawdz(gr.umiera == 0.0, "wlasny granat nie rani gracza");
+    var wrogi = swoj;
+    wrogi.wrogi = true;
+    wrogi.czas = 0.0;
+    wrogi.aktywny = true;
+    gr.granatyWLocie.push(wrogi);
+    graj(&gr, nic(), 10);
+    sprawdz(gr.umiera > 0.0, "wybuch granatu wroga zabija");
+
+    var k = naMapie(&m);
+    k.zycia = 1;
+    kulaWroga(&k, k.graczX, k.graczY - 40.0, 0.0, 200.0);
+    graj(&k, nic(), 120);
+    sprawdz(k.koniec and k.zycia == 0, "ostatnie zycie: koniec gry");
+    let kroki = k.kroki;
+    graj(&k, ster(true, false, false, false, true, false), 30);
+    sprawdz(k.kroki == kroki, "po koncu gry nic sie nie dzieje");
+}
+
+fun testPunktow() -> () = {
+    print("Punkty i przedmioty\n");
+    var m = pustaMapa(40);
+    var g = naMapie(&m);
+    model.dodajPunkty(&g, 9950);
+    sprawdz(g.zycia == 3, "9950 pkt: bez nowego zycia");
+    model.dodajPunkty(&g, 100);
+    sprawdz(g.zycia == 4 and g.nastepneZycie == 50000, "10 000 pkt: dodatkowe zycie, nastepne przy 50 000");
+    model.dodajPunkty(&g, 40000);
+    sprawdz(g.zycia == 5 and g.nastepneZycie == 100000, "50 000 pkt: kolejne zycie, potem co 50 000");
+
+    var s = naMapie(&m);
+    model.dodajPrzedmiot(&s, model.SKRZYNKA, s.graczX, s.graczY - 10.0, -1);
+    graj(&s, nic(), 1);
+    sprawdz(s.granaty == 10 and s.przedmioty.length() == 0, "skrzynka: +4 granaty");
+
+    var k = naMapie(&m);
+    let straz = model.dodajWroga(&k, model.STRAZNIK, 100.0, k.graczY - 120.0);
+    let si = model.indeksWroga(&k, straz);
+    k.wrogowie.at(si).kx = 1.0;
+    k.wrogowie.at(si).czasStrzalu = 1000.0;
+    model.dodajPrzedmiot(&k, model.JENIEC, 68.0, k.graczY - 120.0, straz);
+    graj(&k, nic(), 30);
+    let sj = model.indeksWroga(&k, straz);
+    sprawdz(k.wrogowie.at(sj).x > 100.0 and blisko(k.przedmioty.at(0).x, k.wrogowie.at(sj).x - 32.0, 0.01f32), "jeniec idzie za straznikiem");
+    model.zabij(&k, sj);
+    graj(&k, nic(), 1);
+    sprawdz(k.punkty == 200 and k.przedmioty.at(0).uwolniony, "straznik zabity (+200): jeniec wolny");
+    k.graczX = k.przedmioty.at(0).x;
+    k.graczY = k.przedmioty.at(0).y + 10.0;
+    graj(&k, nic(), 1);
+    sprawdz(k.punkty == 1200 and k.przedmioty.length() == 0, "uwolniony jeniec odebrany: +1000");
+
+    var u = naMapie(&m);
+    let odjezdza = model.dodajWroga(&u, model.STRAZNIK, 640.0, u.graczY - 120.0);
+    u.wrogowie.at(model.indeksWroga(&u, odjezdza)).kx = 1.0;
+    model.dodajPrzedmiot(&u, model.JENIEC, 608.0, u.graczY - 120.0, odjezdza);
+    graj(&u, nic(), 2);
+    sprawdz(u.wrogowie.length() == 0 and u.przedmioty.length() == 0, "konwoj za krawedzia ekranu: jeniec przepada");
+}
+
+fun testBramy() -> () = {
+    print("Brama\n");
+    var m = pustaMapa(20);
+    m.at(0) = "WWWWWWWWWWWWWW";
+    m.at(1) = "WWWWWWGGWWWWWW";
+    var g = naMapie(&m);
+    g.ochrona = 100000.0;
+    g.granaty = 4;
+    graj(&g, ster(true, false, false, false, false, false), 200);
+    sprawdz(g.kameraY == 0.0 and g.brama, "ekran dojezdza do bramy i staje");
+    sprawdz(g.doWypuszczenia == 8 and g.wrogowie.length() == 1 and g.wrogowie.at(0).typ == model.OFICER, "oficer wychodzi, czeka fala 8 zolnierzy (6 + 2 x obszar)");
+    let oficerX = g.wrogowie.at(0).x;
+    graj(&g, nic(), 30);
+    sprawdz(g.wrogowie.at(0).x != oficerX and g.wrogowie.at(0).y == 100.0, "oficer ucieka w bok");
+    var pokonani: i32 = 0;
+    var n: i32 = 0;
+    var bylNowyPoziom = false;
+    while (n < 1800 and not g.ukonczony) {
+        graj(&g, nic(), 1);
+        var i: i64 = 0;
+        while (i < g.wrogowie.length()) {
+            if (g.wrogowie.at(i).typ != model.OFICER and g.wrogowie.at(i).zywy) {
+                model.zabij(&g, i);
+                pokonani += 1;
+            }
+            i += 1;
+        }
+        n += 1;
+    }
+    graj(&g, nic(), 1);
+    bylNowyPoziom = g.nowyPoziom;
+    sprawdz(pokonani == 8 and g.ukonczony and bylNowyPoziom, "po pokonaniu fali obszar zdobyty");
+    let punkty = g.punkty;
+    sprawdz(punkty >= 3000 + 8 * 100, "premia 3000 za obszar");
+    graj(&g, nic(), 200);
+    sprawdz(g.poziom == 2 and g.wiersze == 68 and not g.ukonczony and not g.brama, "po 3 s nastepny obszar: Kanion");
+    sprawdz(g.zycia == 3 and g.granaty == 4 and g.punkty == punkty, "zycia, granaty i punkty przechodza dalej");
+}
+
+fun testLosowychZolnierzy() -> () = {
+    print("Losowi zolnierze\n");
+    var m = pustaMapa(60);
+    m.at(50) = "#.#.#.#.#.#.#.";
+    var g = naMapie(&m);
+    g.czasSpawnu = 0.5;
+    g.ochrona = 100000.0;
+    var najwiecej: i32 = 0;
+    var naPrzeszkodzie = false;
+    var n: i32 = 0;
+    while (n < 1200) {
+        graj(&g, nic(), 1);
+        if (model.liczWrogich(&g) > najwiecej) najwiecej = model.liczWrogich(&g);
+        var i: i64 = 0;
+        while (i < g.wrogowie.length()) {
+            let rodzaj = g.wrogowie.at(i).typ;
+            if ((rodzaj == model.ZOLNIERZ or rodzaj == model.GRANATNIK) and not model.wolne(&g, g.wrogowie.at(i).x, g.wrogowie.at(i).y, 10.0)) naPrzeszkodzie = true;
+            i += 1;
+        }
+        n += 1;
+    }
+    sprawdz(najwiecej > 0 and najwiecej <= 4, "zolnierze naplywaja, najwyzej 3 + obszar naraz");
+    sprawdz(not naPrzeszkodzie, "zolnierze nigdy nie wchodza na przeszkody");
+}
+
+# Automat: idzie w górę, kołysze się na boki, strzela i co jakiś czas rzuca granat.
+fun automat(n: i32) -> model.Sterowanie = {
+    let faza = (n / 90) % 4;
+    return model.Sterowanie(n % 240 < 200, false, faza == 1, faza == 3, true, n % 150 == 0);
+}
+
+fun testPowtarzalnosci() -> () = {
+    print("Powtarzalnosc\n");
+    var a = model.nowaGra(42u64);
+    var b = model.nowaGra(42u64);
+    var n: i32 = 0;
+    while (n < 1500) {
+        var sa = automat(n);
+        var sb = automat(n);
+        model.krok(&a, &sa);
+        model.krok(&b, &sb);
+        n += 1;
+    }
+    sprawdz(a.punkty == b.punkty and a.graczX == b.graczX and a.graczY == b.graczY and a.kameraY == b.kameraY
+        and a.los == b.los and a.wrogowie.length() == b.wrogowie.length() and a.zycia == b.zycia,
+        "to samo ziarno i te same klawisze: identyczna gra");
+    var c = model.nowaGra(42u64);
+    var d = model.nowaGra(42u64);
+    var s = ster(true, false, false, false, true, false);
+    var k: i32 = 0;
+    while (k < 60) { model.aktualizuj(&c, 0.033333335f32, s); k += 1; }
+    k = 0;
+    while (k < 240) { model.aktualizuj(&d, 0.008333334f32, s); k += 1; }
+    sprawdz(c.kroki == 120 and d.kroki == 120 and c.graczY == d.graczY and c.los == d.los, "30 i 120 klatek na sekunde: te same kroki i ten sam stan");
+    var e = model.nowaGra(42u64);
+    model.aktualizuj(&e, 0.005f32, ster(false, false, false, false, false, true));
+    sprawdz(e.granaty == 6, "granat w klatce krotszej niz krok czeka...");
+    model.aktualizuj(&e, 0.02f32, nic());
+    sprawdz(e.granaty == 5, "...i leci w nastepnym kroku");
+}
+
+fun testDlugiejGry() -> () = {
+    print("Dluga gra automatem (3 minuty)\n");
+    var g = model.nowaGra(7u64);
+    g.zycia = 1000;
+    var graczNaPrzeszkodzie = false;
+    var kameraWDol = false;
+    var poprzedniaKamera = g.kameraY;
+    var poprzedniPoziom = g.poziom;
+    var n: i32 = 0;
+    while (n < 10800) {
+        var s = automat(n);
+        model.krok(&g, &s);
+        if (not model.wolne(&g, g.graczX, g.graczY, model.PROMIEN_GRACZA - 0.5f32)) graczNaPrzeszkodzie = true;
+        if (g.poziom == poprzedniPoziom and g.kameraY > poprzedniaKamera) kameraWDol = true;
+        poprzedniaKamera = g.kameraY;
+        poprzedniPoziom = g.poziom;
+        n += 1;
+    }
+    sprawdz(not graczNaPrzeszkodzie, "gracz nigdy nie stoi na przeszkodzie");
+    sprawdz(not kameraWDol, "ekran nigdy nie cofa sie w obrebie obszaru");
+    sprawdz(g.zabici > 20 and g.punkty > 2000, f"automat walczy: {g.zabici} zabitych, {g.punkty} pkt, obszar {g.poziom}, {1000 - g.zycia} zyc mniej".asSlice());
+}
+
+fun main() = {
+    testStartu();
+    testMap();
+    testRuchu();
+    testTerenu();
+    testKamery();
+    testStrzalu();
+    testKuliIGranatu();
+    testWrogow();
+    testSmierci();
+    testPunktow();
+    testBramy();
+    testLosowychZolnierzy();
+    testPowtarzalnosci();
+    testDlugiejGry();
+    print(f"Wynik: {wszystkie - nieudane}/{wszystkie} sprawdzen udanych\n".asSlice());
+    return nieudane;
+}
