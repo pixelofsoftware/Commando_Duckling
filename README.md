@@ -1,5 +1,7 @@
 # Commando w Ducklingu
 
+![Napisane w Duckling](https://img.shields.io/badge/napisane%20w-Duckling-f2c94c)
+
 Gra akcji z widokiem z góry na wzór automatu Commando (Capcom, 1985), napisana w Ducklingu. Żołnierz przedziera się sam przez trzy obszary: dżunglę, kanion i twierdzę. Ekran przewija się w górę, gdy idziesz naprzód. Na końcu każdego obszaru czeka brama, z której wybiega fala żołnierzy.
 
 Okno, klawiatura, rysowanie i dźwięk pochodzą z pakietu `grafika` (raylib 5.5) z [duckling-biblioteki](https://github.com/andr729/duckling-biblioteki). Cała grafika jest rysowana kształtami w kodzie, a dźwięki generuje skrypt w `narzedzia/`, więc w repozytorium nie ma cudzych materiałów.
